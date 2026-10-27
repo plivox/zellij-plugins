@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
-members = ["bar", "claude", "common"]
+members = ["bar", "claude", "common", "git"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/plivox/zellij-plugins"

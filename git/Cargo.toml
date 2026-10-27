@@ -1,0 +1,10 @@
+[package]
+name = "git"
+description = "Git changes of the focused pane: staged, changes, untracked; diff, stage, lazygit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+zellij-tile.workspace = true

@@ -11,6 +11,10 @@
   renames it, its `✕` closes the active tab (a second click confirms); the Claude Code button (`✳` and
   the sessions by status) opens their list.
 
+- **git**: the git changes of the focused pane, in a floating panel: staged,
+  not staged, untracked, in conflict, with the lines added and removed. Enter
+  shows a diff, `s` stages or unstages a file, `g` opens lazygit.
+
 The release has the plugins, the Claude Code hook (`claude-hook.sh`) and
 their SHA256 (`sha256sums.txt`).
 
@@ -90,6 +94,27 @@ time, `claude` the URL of the claude plugin, for the Claude Code button.
 
 Permissions: `ReadApplicationState`, `ChangeApplicationState`,
 `MessageAndLaunchOtherPlugins`.
+
+## git
+
+From a key binding:
+
+```kdl
+bind "Alt g" {
+    LaunchOrFocusPlugin "file:~/.config/zellij/plugins/git.wasm" {
+        floating true
+        move_to_focused_tab true
+    }
+}
+```
+
+It follows the working directory of the focused terminal pane, read again
+every 2 seconds while shown. `↑↓`/`jk` select a file, Enter (or a click) shows
+its diff in a floating pane (Ctrl-c closes it), `s` or Space stages or
+unstages it, `g` opens [lazygit](https://github.com/jesseduffield/lazygit),
+`r` reads again, Esc closes the panel.
+
+Permissions: `ReadApplicationState`, `ChangeApplicationState`, `RunCommands`.
 
 ## Build
 
