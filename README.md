@@ -132,7 +132,7 @@ every 2 seconds while shown. `↑↓`/`jk` select a file, Enter (or a click) sho
 its diff in a floating pane (Ctrl-c closes it), `s` or Space stages or
 unstages it, `g` opens [lazygit](https://github.com/jesseduffield/lazygit),
 `r` reads again, `p` docks the panel on the right (in the tiled panes, a
-third of the width) or floats it again, Tab shows the list of claude in its
+third of the width, kept when panes come and go) or floats it again, Tab shows the list of claude in its
 place, Esc closes it. With `docked "true"`
 in its configuration, it starts docked.
 

@@ -125,6 +125,7 @@ impl ZellijPlugin for State {
                 true
             },
             Event::TabUpdate(tabs) => {
+                self.panel.set_tabs(&tabs);
                 if let Some(tab) = tabs.iter().find(|tab| tab.active) {
                     self.active_tab = tab.position;
                 }
@@ -163,9 +164,11 @@ impl ZellijPlugin for State {
             Event::RunCommandResult(code, stdout, stderr, context) => self.result(code, &stdout, &stderr, &context),
             Event::Key(key) => self.key(key),
             Event::Mouse(Mouse::LeftClick(0, column)) => {
-                if let Some(name) = panel::tab_at(column).filter(|name| *name != "git") {
-                    panel::switch(name);
-                }
+                self.panel.click(0, column);
+                false
+            },
+            Event::Mouse(Mouse::Hover(line, column)) => {
+                self.panel.hover(line, column);
                 false
             },
             Event::Mouse(Mouse::LeftClick(line, _)) => {

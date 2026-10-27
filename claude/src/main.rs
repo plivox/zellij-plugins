@@ -156,6 +156,9 @@ impl ZellijPlugin for State {
                 true
             },
             Event::TabUpdate(tabs) => {
+                if self.list {
+                    self.panel.set_tabs(&tabs);
+                }
                 self.tabs = tabs;
                 self.refresh(false);
                 false
@@ -200,9 +203,11 @@ impl ZellijPlugin for State {
             },
             Event::Key(key) if self.list => self.key(key),
             Event::Mouse(Mouse::LeftClick(0, column)) if self.list => {
-                if let Some(name) = panel::tab_at(column).filter(|name| *name != "claude") {
-                    panel::switch(name);
-                }
+                self.panel.click(0, column);
+                false
+            },
+            Event::Mouse(Mouse::Hover(line, column)) if self.list => {
+                self.panel.hover(line, column);
                 false
             },
             Event::Mouse(Mouse::LeftClick(line, _)) if self.list => {
