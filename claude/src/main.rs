@@ -4,14 +4,20 @@
 //! - in the background (load_plugins): follows the sessions from the events
 //!   of the Claude Code hook, names their tabs after the conversation and
 //!   sends the sessions to the other plugins;
-//! - with `view "list"` (floating, from a key binding): lists the sessions,
-//!   Enter or a click jumps to one.
+//! - with `view "list"` (floating, from a key binding): lists the sessions of
+//!   all the zellij sessions, Enter or a click jumps to one.
+//!
+//! The background instance of each zellij session writes its sessions in the
+//! cache shared by the instances of the plugin; in a zellij session without
+//! it, the panes of Claude Code are found by their title.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::{
-    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, topic_from_title, truncate,
+    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, status_from_title, topic_from_title,
+    truncate,
 };
 use serde_json::Value;
 use zellij_tile::prelude::*;
@@ -20,17 +26,26 @@ use zellij_tile::prelude::*;
 const TAB_TOPIC_LENGTH: usize = 30;
 /// Lines above the sessions in the list
 const LIST_HEADER: usize = 2;
+/// Seconds between two reads of the zellij sessions by the list
+const SCAN_INTERVAL: f64 = 2.0;
+/// The sessions of each zellij session (<name>.json), shared by the instances
+const SESSIONS_DIR: &str = "/cache/sessions";
 
 #[derive(Default)]
 struct State {
     list: bool,
     permitted: bool,
+    /// Background: the name of its zellij session
+    zellij_session: String,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
     /// Background: the sessions by id, the last name requested by tab
     sessions: BTreeMap<String, Session>,
     tab_names: HashMap<usize, String>,
-    /// List: the sessions received, the selected one
+    /// List: the sessions of its zellij session (received), the zellij
+    /// sessions, the sessions shown and the selected one
+    current: Vec<Session>,
+    zellij_sessions: Vec<SessionInfo>,
     shown: Vec<Session>,
     selected: usize,
 }
@@ -50,8 +65,9 @@ impl ZellijPlugin for State {
 
         let mut events = vec![EventType::PermissionRequestResult, EventType::TabUpdate, EventType::PaneUpdate];
         if self.list {
-            events.extend([EventType::Key, EventType::Mouse]);
+            events.extend([EventType::Key, EventType::Mouse, EventType::SessionUpdate, EventType::Timer]);
         } else {
+            events.push(EventType::SessionUpdate);
             set_selectable(false);
         }
         subscribe(&events);
@@ -71,6 +87,7 @@ impl ZellijPlugin for State {
                         change_floating_panes_coordinates(vec![(PaneId::Plugin(id), coordinates)]);
                     }
                     pipe_message_to_plugin(MessageToPlugin::new(SYNC_PIPE));
+                    self.scan();
                 } else {
                     self.broadcast();
                 }
@@ -85,6 +102,27 @@ impl ZellijPlugin for State {
                 self.panes = panes;
                 self.refresh(false);
                 false
+            },
+            Event::SessionUpdate(zellij_sessions, _) if !self.list => {
+                let name = zellij_sessions.iter().find(|info| info.is_current_session).map(|info| info.name.clone());
+                if let Some(name) = name.filter(|name| *name != self.zellij_session) {
+                    // Renamed: the file of the previous name goes
+                    if !self.zellij_session.is_empty() {
+                        let _ = fs::remove_file(session_file(&self.zellij_session));
+                    }
+                    self.zellij_session = name;
+                    self.broadcast();
+                }
+                false
+            },
+            Event::SessionUpdate(zellij_sessions, _) if self.list => {
+                self.zellij_sessions = zellij_sessions;
+                self.rebuild();
+                true
+            },
+            Event::Timer(_) if self.list => {
+                self.scan();
+                true
             },
             Event::Key(key) if self.list => self.key(key),
             Event::Mouse(Mouse::LeftClick(line, _)) if self.list => {
@@ -111,8 +149,8 @@ impl ZellijPlugin for State {
             },
             STATE_PIPE if self.list => {
                 if let Some(sessions) = message.payload.as_deref().and_then(|p| serde_json::from_str(p).ok()) {
-                    self.shown = sessions;
-                    self.selected = self.selected.min(self.shown.len().saturating_sub(1));
+                    self.current = sessions;
+                    self.rebuild();
                 }
                 true
             },
@@ -255,16 +293,109 @@ impl State {
         }
     }
 
-    /// The sessions to all the plugins, in the order of the tabs
-    fn broadcast(&self) {
-        if !self.permitted {
-            return;
+    /// The sessions to all the plugins and to the file of the zellij
+    /// session, in the order of the tabs
+    fn broadcast(&mut self) {
+        let zellij_session = self.zellij_session.clone();
+        let mut sessions: Vec<&mut Session> = self.sessions.values_mut().collect();
+        for session in &mut sessions {
+            session.zellij_session.clone_from(&zellij_session);
         }
-        let mut sessions: Vec<&Session> = self.sessions.values().collect();
         sessions.sort_by_key(|session| (session.tab_position, session.pane_id));
-        if let Ok(payload) = serde_json::to_string(&sessions) {
+        let Ok(payload) = serde_json::to_string(&sessions) else { return };
+
+        if !zellij_session.is_empty() {
+            let _ = fs::create_dir_all(SESSIONS_DIR);
+            let _ = fs::write(session_file(&zellij_session), &payload);
+        }
+        if self.permitted {
             pipe_message_to_plugin(MessageToPlugin::new(STATE_PIPE).with_payload(payload));
         }
+    }
+
+    /// The other zellij sessions are only read on request: again in a while
+    fn scan(&mut self) {
+        if let Ok(snapshot) = get_session_list() {
+            self.zellij_sessions = snapshot.live_sessions;
+            self.rebuild();
+        }
+        set_timeout(SCAN_INTERVAL);
+    }
+
+    /// The sessions of all the zellij sessions, the current one first: from
+    /// the background instance of each one, else from the pane titles. The
+    /// files of the zellij sessions that are gone are removed.
+    fn rebuild(&mut self) {
+        if self.zellij_sessions.is_empty() {
+            self.shown = self.current.clone();
+            self.selected = self.selected.min(self.shown.len().saturating_sub(1));
+            return;
+        }
+
+        let mut shown = vec![];
+        let mut alive = HashSet::new();
+
+        for info in &self.zellij_sessions {
+            alive.insert(session_file(&info.name));
+
+            let tracked: Vec<Session> = if info.is_current_session {
+                self.current.clone()
+            } else {
+                fs::read_to_string(session_file(&info.name))
+                    .ok()
+                    .and_then(|content| serde_json::from_str(&content).ok())
+                    .unwrap_or_default()
+            };
+
+            let panes = || {
+                info.panes.panes.iter().flat_map(|(position, panes)| {
+                    panes.iter().filter(|pane| !pane.is_plugin).map(move |pane| (*position, pane))
+                })
+            };
+
+            // The tracked sessions still running, with the title of their pane
+            for mut session in tracked {
+                let Some((position, pane)) = panes().find(|(_, pane)| pane.id == session.pane_id) else { continue };
+                session.tab_position = Some(position);
+                session.topic = topic_from_title(&pane.title);
+                session.zellij_session.clone_from(&info.name);
+                shown.push(session);
+            }
+
+            // The other panes of Claude Code
+            for (position, pane) in panes() {
+                let Some(status) = status_from_title(&pane.title) else { continue };
+                if shown.iter().any(|s: &Session| s.zellij_session == info.name && s.pane_id == pane.id) {
+                    continue;
+                }
+                shown.push(Session {
+                    id: format!("{}:{}", info.name, pane.id),
+                    pane_id: pane.id,
+                    tab_position: Some(position),
+                    topic: topic_from_title(&pane.title),
+                    status,
+                    zellij_session: info.name.clone(),
+                    ..Default::default()
+                });
+            }
+        }
+
+        let current = self.zellij_sessions.iter().find(|info| info.is_current_session).map(|info| info.name.clone());
+        shown.sort_by_key(|s| {
+            (Some(&s.zellij_session) != current.as_ref(), s.zellij_session.clone(), s.tab_position, s.pane_id)
+        });
+
+        if let Ok(files) = fs::read_dir(SESSIONS_DIR) {
+            for file in files.flatten() {
+                let path = file.path().to_string_lossy().to_string();
+                if !alive.contains(&path) {
+                    let _ = fs::remove_file(path);
+                }
+            }
+        }
+
+        self.shown = shown;
+        self.selected = self.selected.min(self.shown.len().saturating_sub(1));
     }
 
     fn key(&mut self, key: KeyWithModifier) -> bool {
@@ -290,10 +421,14 @@ impl State {
     }
 
     fn jump(&self) {
-        if let Some(session) = self.shown.get(self.selected) {
+        let Some(session) = self.shown.get(self.selected) else { return };
+        let current = self.zellij_sessions.iter().find(|info| info.is_current_session);
+        if session.zellij_session.is_empty() || current.is_none_or(|info| info.name == session.zellij_session) {
             focus_pane_with_id(PaneId::Terminal(session.pane_id), false, false);
-            close_self();
+        } else {
+            switch_session_with_focus(&session.zellij_session, session.tab_position, Some((session.pane_id, false)));
         }
+        close_self();
     }
 
     fn render_list(&self, rows: usize, cols: usize) {
@@ -307,11 +442,18 @@ impl State {
         println!();
 
         if self.shown.is_empty() {
-            println!("\u{1b}[2mNo Claude Code session in this zellij session\u{1b}[0m");
+            println!("\u{1b}[2mNo Claude Code session\u{1b}[0m");
             return;
         }
 
         let project_width = self.shown.iter().map(|s| s.project().chars().count()).max().unwrap_or(0).min(20);
+        // The zellij session, when there are several
+        let several = self.shown.iter().any(|s| s.zellij_session != self.shown[0].zellij_session);
+        let zellij_width = if several {
+            self.shown.iter().map(|s| s.zellij_session.chars().count()).max().unwrap_or(0).min(20)
+        } else {
+            0
+        };
 
         for (index, session) in self.shown.iter().enumerate().take(rows.saturating_sub(LIST_HEADER)) {
             let color = match session.status {
@@ -327,7 +469,13 @@ impl State {
             let age = if session.since > 0 && now >= session.since { age(now - session.since) } else { String::new() };
 
             // The topic takes the room left by the other columns
-            let left = format!("{} {:<project_width$}  ", index + 1, truncate(session.project(), project_width));
+            let zellij = if several {
+                format!("{:<zellij_width$}  ", truncate(&session.zellij_session, zellij_width))
+            } else {
+                String::new()
+            };
+            let left =
+                format!("{} {zellij}{:<project_width$}  ", index + 1, truncate(session.project(), project_width));
             let right = format!("  {}  {:>3}", truncate(&detail, 24), age);
             let room = cols.saturating_sub(2 + left.chars().count() + right.chars().count());
             let topic = truncate(session.title(), room);
@@ -349,6 +497,10 @@ fn needs_answer(input: &Value) -> bool {
         },
         None => !input["message"].as_str().unwrap_or_default().contains("waiting for your input"),
     }
+}
+
+fn session_file(zellij_session: &str) -> String {
+    format!("{SESSIONS_DIR}/{}.json", zellij_session.replace('/', "_"))
 }
 
 fn age(seconds: u64) -> String {

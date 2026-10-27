@@ -2,8 +2,8 @@
 
 [zellij](https://zellij.dev) plugins (0.45), written in Rust:
 
-- **claude**: the [Claude Code](https://claude.com/claude-code) sessions of the
-  zellij session. Their tabs are named after the conversation, with its status
+- **claude**: the [Claude Code](https://claude.com/claude-code) sessions of all the
+  zellij sessions. Their tabs are named after the conversation, with its status
   (`⚙` working, `⚠` waiting for a permission or an answer, `✓` done), and a
   floating list jumps to any of them.
 - **bar**: a one-line status bar: the mode, the session, the tabs, the Claude

@@ -62,6 +62,9 @@ pub struct Session {
     pub message: Option<String>,
     /// Unix time of the last status change
     pub since: u64,
+    /// zellij session of the pane
+    #[serde(default)]
+    pub zellij_session: String,
 }
 
 impl Session {
@@ -81,6 +84,17 @@ impl Session {
 pub fn topic_from_title(title: &str) -> String {
     let topic = title.trim_start_matches(|c: char| !c.is_alphanumeric()).trim();
     if topic == "Claude Code" { String::new() } else { topic.to_string() }
+}
+
+/// The status of a pane from the title set by Claude Code (✳ when waiting
+/// for a prompt, a braille spinner when working), for the panes without the
+/// hook: None if it does not look like Claude Code.
+pub fn status_from_title(title: &str) -> Option<Status> {
+    match title.chars().next()? {
+        '✳' => Some(Status::Idle),
+        '\u{2800}'..='\u{28ff}' => Some(Status::Working),
+        _ => None,
+    }
 }
 
 /// Cut to `max` characters, with an ellipsis
@@ -109,6 +123,14 @@ mod tests {
         assert_eq!(topic_from_title("⠂ Fix login bug"), "Fix login bug");
         assert_eq!(topic_from_title("✳ Claude Code"), "");
         assert_eq!(topic_from_title(""), "");
+    }
+
+    #[test]
+    fn status() {
+        assert_eq!(status_from_title("✳ UI Port"), Some(Status::Idle));
+        assert_eq!(status_from_title("⠂ UI Port"), Some(Status::Working));
+        assert_eq!(status_from_title("plivox@hulk: ~"), None);
+        assert_eq!(status_from_title(""), None);
     }
 
     #[test]
