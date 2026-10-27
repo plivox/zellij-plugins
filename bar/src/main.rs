@@ -2,8 +2,9 @@
 //! Claude Code sessions, a hint and the time on the right.
 //!
 //! A click on a tab goes to it, a double click renames it (like the
-//! RenameTab mode: Enter keeps the new name, Esc restores the previous one).
-//! A click on the Claude Code sessions opens their list.
+//! RenameTab mode: Enter keeps the new name, Esc restores the previous one),
+//! a click on the ✕ of the active tab closes it. A click on the Claude Code
+//! button (✳ and the sessions by status) opens their list.
 //!
 //! Configuration (all optional):
 //! - `timezone`: of the time (e.g. Europe/Zurich), else no time
@@ -62,6 +63,8 @@ struct State {
 enum Target {
     /// Position of a tab
     Tab(usize),
+    /// Id of the tab to close
+    Close(usize),
     Claude,
 }
 
@@ -196,22 +199,24 @@ impl State {
         Some(Utc::now().with_timezone(&tz).format("%H:%M").to_string())
     }
 
-    /// The count of the Claude Code sessions by status, the ones that need
-    /// attention first; returns the columns of the summary in the line.
+    /// The Claude Code button: ✳ and the count of the sessions by status,
+    /// the ones that need attention first; returns its columns in the line.
     fn claude_summary(&self, line: &mut Line) -> Option<(usize, usize)> {
-        if self.sessions.is_empty() {
-            return None;
-        }
+        self.claude_url.as_ref()?;
         let start = line.width;
+        line.push(" ✳ ", Some(ORANGE), Some(POLAR1), true);
+        if self.sessions.is_empty() {
+            line.push("Claude ", Some(COMMENT), Some(POLAR1), false);
+        }
         for status in [Status::Waiting, Status::Working, Status::Idle] {
             let count = self.sessions.iter().filter(|s| s.status == status).count();
             if count > 0 {
                 let text = format!("{} {count} ", status.icon());
-                line.push(&text, Some(status_color(status)), None, status == Status::Waiting);
+                line.push(&text, Some(status_color(status)), Some(POLAR1), status == Status::Waiting);
             }
         }
         let end = line.width;
-        line.push(" ", None, None, false);
+        line.push("  ", None, None, false);
         Some((start, end))
     }
 
@@ -227,6 +232,12 @@ impl State {
                 let start = line.width;
                 self.tab_pill(&mut line, tab, statuses.get(&tab.tab_id).copied(), max_name);
                 targets.push((offset + start, offset + line.width, Target::Tab(tab.position)));
+                // The close button of the active tab, at the end of its pill
+                if tab.active && self.mode != InputMode::RenameTab {
+                    let start = line.width;
+                    line.push("✕ ", Some(POLAR3), Some(FROST), true);
+                    targets.push((offset + start, offset + line.width, Target::Close(tab.tab_id)));
+                }
                 line.push(" ", None, None, false);
             }
             if line.width <= room || max_name <= 4 {
@@ -314,6 +325,7 @@ impl State {
                     switch_tab_to(position as u32 + 1);
                 }
             },
+            Target::Close(tab_id) => close_tab_with_id(tab_id as u64),
             Target::Claude => self.open_claude_list(),
         }
     }
