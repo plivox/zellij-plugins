@@ -8,7 +8,7 @@
   floating list jumps to any of them or resumes a previous conversation.
 - **bar**: a one-line status bar: the mode, the session, the tabs, the Claude
   Code button and the time. A click on a tab goes to it, a double click
-  renames it, its `✕` closes the active tab; the Claude Code button (`✳` and
+  renames it, its `✕` closes the active tab (a second click confirms); the Claude Code button (`✳` and
   the sessions by status) opens their list.
 
 The release has the plugins, the Claude Code hook (`claude-hook.sh`) and

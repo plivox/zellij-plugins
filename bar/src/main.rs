@@ -3,7 +3,8 @@
 //!
 //! A click on a tab goes to it, a double click renames it (like the
 //! RenameTab mode: Enter keeps the new name, Esc restores the previous one),
-//! a click on the ✕ of the active tab closes it. A click on the Claude Code
+//! a click on the ✕ of the active tab asks to confirm (a second click within
+//! a few seconds) and closes it. A click on the Claude Code
 //! button (✳ and the sessions by status) opens their list.
 //!
 //! Configuration (all optional):
@@ -16,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status};
+use common::{NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -24,6 +25,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 /// To the bars of the other tabs (each tab has its own): the position of the
 /// clicked tab
 const CLICK_PIPE: &str = "bar::click";
+/// Delay to confirm the close of a tab
+const CONFIRM_CLOSE: Duration = Duration::from_secs(3);
 
 // Nord, the colors of the plivox theme
 type Rgb = (u8, u8, u8);
@@ -57,6 +60,10 @@ struct State {
     last_click: Option<(usize, SystemTime)>,
     /// A rename started by a double click
     renaming: bool,
+    /// The tab to close on a second click on its button, until this time
+    close: Option<(usize, SystemTime)>,
+    /// Unix time of the next minute, when the clock timer fires
+    clock_at: u64,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -119,10 +126,7 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
                 changed
             },
-            Event::Mouse(Mouse::LeftClick(_, column)) => {
-                self.click(column);
-                false
-            },
+            Event::Mouse(Mouse::LeftClick(_, column)) => self.click(column),
             Event::Mouse(Mouse::ScrollUp(_)) => {
                 go_to_previous_tab();
                 false
@@ -132,7 +136,14 @@ impl ZellijPlugin for State {
                 false
             },
             Event::Timer(_) => {
-                self.schedule_clock();
+                // The close not confirmed in time
+                if self.close.is_some_and(|(_, until)| SystemTime::now() >= until) {
+                    self.close = None;
+                }
+                // Not again for the timer of a close
+                if now() + 1 >= self.clock_at {
+                    self.schedule_clock();
+                }
                 true
             },
             _ => false,
@@ -188,10 +199,11 @@ impl ZellijPlugin for State {
 }
 
 impl State {
-    fn schedule_clock(&self) {
+    fn schedule_clock(&mut self) {
         // At the next minute
-        let seconds = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
-        set_timeout((60 - seconds % 60) as f64);
+        let seconds = now();
+        self.clock_at = seconds - seconds % 60 + 60;
+        set_timeout((self.clock_at - seconds) as f64);
     }
 
     fn time(&self) -> Option<String> {
@@ -235,7 +247,11 @@ impl State {
                 // The close button of the active tab, at the end of its pill
                 if tab.active && self.mode != InputMode::RenameTab {
                     let start = line.width;
-                    line.push("✕ ", Some(POLAR3), Some(FROST), true);
+                    if self.close.is_some_and(|(tab_id, _)| tab_id == tab.tab_id) {
+                        line.push(" close? ", Some(POLAR0), Some(RED), true);
+                    } else {
+                        line.push("✕ ", Some(POLAR3), Some(FROST), true);
+                    }
                     targets.push((offset + start, offset + line.width, Target::Close(tab.tab_id)));
                 }
                 line.push(" ", None, None, false);
@@ -302,11 +318,12 @@ impl State {
         statuses
     }
 
-    fn click(&mut self, column: usize) {
-        let Some(target) = self.targets.iter().find(|(start, end, _)| (*start..*end).contains(&column)).map(|t| t.2)
-        else {
-            return;
-        };
+    /// Returns whether to render again
+    fn click(&mut self, column: usize) -> bool {
+        let target = self.targets.iter().find(|(start, end, _)| (*start..*end).contains(&column)).map(|t| t.2);
+        // Any other click cancels a close
+        let close = self.close.take();
+        let Some(target) = target else { return close.is_some() };
         match target {
             Target::Tab(position) => {
                 let now = SystemTime::now();
@@ -325,9 +342,17 @@ impl State {
                     switch_tab_to(position as u32 + 1);
                 }
             },
-            Target::Close(tab_id) => close_tab_with_id(tab_id as u64),
+            Target::Close(tab_id) => {
+                if close.is_some_and(|(id, until)| id == tab_id && SystemTime::now() < until) {
+                    close_tab_with_id(tab_id as u64);
+                } else {
+                    self.close = Some((tab_id, SystemTime::now() + CONFIRM_CLOSE));
+                    set_timeout(CONFIRM_CLOSE.as_secs_f64());
+                }
+            },
             Target::Claude => self.open_claude_list(),
         }
+        true
     }
 
     /// Like the RenameTab mode of the Alt R binding: the name is typed from
@@ -349,7 +374,7 @@ impl State {
         }
         let config = BTreeMap::from([("view".to_string(), "list".to_string())]);
         pipe_message_to_plugin(
-            MessageToPlugin::new("claude::open")
+            MessageToPlugin::new(OPEN_PIPE)
                 .with_plugin_url(url)
                 .with_plugin_config(config)
                 .new_plugin_instance_should_float(true),
@@ -384,6 +409,10 @@ impl Line {
         self.text.push_str(&other.text);
         self.width += other.width;
     }
+}
+
+fn now() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default()
 }
 
 fn mode_name(mode: InputMode) -> &'static str {

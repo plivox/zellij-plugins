@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::{
-    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
+    EVENT_PIPE, NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
     status_from_title, topic_from_title, truncate,
 };
 use serde_json::Value;
@@ -202,6 +202,11 @@ impl ZellijPlugin for State {
             },
             SYNC_PIPE if !self.list => {
                 self.broadcast();
+                false
+            },
+            // From the button of the bar: the floating panes may be hidden
+            OPEN_PIPE if self.list => {
+                show_self(true);
                 false
             },
             STATE_PIPE if self.list => {
