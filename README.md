@@ -13,7 +13,8 @@
 
 - **git**: the git changes of the focused pane, in a floating panel: staged,
   not staged, untracked, in conflict, with the lines added and removed. Enter
-  shows a diff, `s` stages or unstages a file, `g` opens lazygit.
+  shows a diff, `s` stages or unstages a file, `g` opens lazygit, `p` docks
+  it on the right.
 
 The release has the plugins, the Claude Code hook (`claude-hook.sh`) and
 their SHA256 (`sha256sums.txt`).
@@ -112,7 +113,9 @@ It follows the working directory of the focused terminal pane, read again
 every 2 seconds while shown. `↑↓`/`jk` select a file, Enter (or a click) shows
 its diff in a floating pane (Ctrl-c closes it), `s` or Space stages or
 unstages it, `g` opens [lazygit](https://github.com/jesseduffield/lazygit),
-`r` reads again, Esc closes the panel.
+`r` reads again, `p` docks the panel on the right (in the tiled panes, a
+third of the width) or floats it again, Esc closes it. With `docked "true"`
+in its configuration, it starts docked.
 
 Permissions: `ReadApplicationState`, `ChangeApplicationState`, `RunCommands`.
 
