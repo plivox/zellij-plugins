@@ -3,6 +3,9 @@
 
 use serde::{Deserialize, Serialize};
 
+#[cfg(feature = "panel")]
+pub mod panel;
+
 /// From the Claude Code hook to all the plugins: the hook input (JSON) as
 /// payload, the zellij pane of Claude and the time as arguments.
 pub const EVENT_PIPE: &str = "claude::event";
@@ -10,8 +13,6 @@ pub const EVENT_PIPE: &str = "claude::event";
 pub const STATE_PIPE: &str = "claude::state";
 /// To the claude plugin: asks for the sessions, sent again on STATE_PIPE.
 pub const SYNC_PIPE: &str = "claude::sync";
-/// To the list of the claude plugin (launched if needed): shows it.
-pub const OPEN_PIPE: &str = "claude::open";
 
 /// Ends the tab names set by the plugins (and by the zellij module of
 /// Prezto): a tab without it was renamed by hand and is left alone.

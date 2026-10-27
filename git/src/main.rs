@@ -4,13 +4,15 @@
 //! changes: staged, not staged, untracked, in conflict, with the lines added
 //! and removed. Enter (or a click) shows the diff of a file, `s` stages or
 //! unstages it, `g` opens lazygit, `p` docks the panel on the right (in the
-//! tiled panes) or floats it again, Esc closes it.
+//! tiled panes, stacked with the list of claude when docked too) or floats it
+//! again, Esc closes it.
 //!
 //! Configuration: `docked "true"` to start docked.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
+use common::panel::{Panel, place};
 use common::truncate;
 use zellij_tile::prelude::*;
 
@@ -18,6 +20,8 @@ use zellij_tile::prelude::*;
 const HEADER: usize = 2;
 /// Seconds between two reads of the changes while the panel is visible
 const REFRESH_INTERVAL: f64 = 2.0;
+/// Floating: on the right
+const FLOATING: [&str; 4] = ["55%", "5%", "44%", "90%"];
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Section {
@@ -60,9 +64,9 @@ struct Entry {
 struct State {
     permitted: bool,
     visible: bool,
-    /// Docked at the start; floating or docked, once known
+    /// Docked at the start
     docked: bool,
-    floating: Option<bool>,
+    panel: Panel,
     /// The focused terminal pane and its working directory
     pane: Option<u32>,
     cwd: Option<PathBuf>,
@@ -113,9 +117,9 @@ impl ZellijPlugin for State {
                 self.visible = true;
                 rename_plugin_pane(get_plugin_ids().plugin_id, "Git");
                 if self.docked {
-                    toggle_dock();
+                    self.panel.toggle();
                 } else {
-                    place();
+                    place(FLOATING);
                 }
                 self.follow_cwd();
                 set_timeout(REFRESH_INTERVAL);
@@ -128,16 +132,7 @@ impl ZellijPlugin for State {
                 false
             },
             Event::PaneUpdate(manifest) => {
-                // Docked or floated again: its size
-                let id = get_plugin_ids().plugin_id;
-                let floating =
-                    manifest.panes.values().flatten().find(|p| p.is_plugin && p.id == id).map(|p| p.is_floating);
-                if floating.is_some() && floating != self.floating {
-                    if self.floating.is_some() || floating == Some(false) {
-                        if floating == Some(true) { place() } else { narrow() }
-                    }
-                    self.floating = floating;
-                }
+                self.panel.update(&manifest, FLOATING);
                 let focused = manifest.panes.get(&self.active_tab).and_then(|panes| {
                     panes.iter().find(|pane| !pane.is_plugin && pane.is_focused && !pane.is_floating).map(|p| p.id)
                 });
@@ -307,7 +302,7 @@ impl State {
             BareKey::Char('s') | BareKey::Char(' ') => self.stage(),
             BareKey::Char('g') => self.open(CommandToRun::new("lazygit")),
             BareKey::Char('r') => self.refresh(),
-            BareKey::Char('p') => toggle_dock(),
+            BareKey::Char('p') => self.panel.toggle(),
             BareKey::Esc | BareKey::Char('q') => close_self(),
             _ => return false,
         }
@@ -436,32 +431,6 @@ impl State {
 
         // Without a newline after the last line: the pane would scroll
         print!("{}", output.join("\n"));
-    }
-}
-
-/// Docks the panel in the tiled panes (zellij puts it on the right of the
-/// largest one), or floats it again
-fn toggle_dock() {
-    toggle_pane_embed_or_eject_for_pane_id(PaneId::Plugin(get_plugin_ids().plugin_id));
-}
-
-/// Docked: about a third of the width, from half (the focus stays on the
-/// terminal: the next panes split it, not the panel)
-fn narrow() {
-    let id = PaneId::Plugin(get_plugin_ids().plugin_id);
-    for _ in 0..3 {
-        resize_pane_with_id(ResizeStrategy::new(Resize::Decrease, Some(Direction::Left)), id);
-    }
-}
-
-/// Floating: a panel on the right, shown (the floating panes may be hidden)
-fn place() {
-    show_self(true);
-    let size = |value: &str| Some(value.to_string());
-    if let Some(coordinates) =
-        FloatingPaneCoordinates::new(size("55%"), size("5%"), size("44%"), size("90%"), None, None)
-    {
-        change_floating_panes_coordinates(vec![(PaneId::Plugin(get_plugin_ids().plugin_id), coordinates)]);
     }
 }
 

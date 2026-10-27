@@ -7,3 +7,8 @@ license.workspace = true
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
+zellij-tile = { workspace = true, optional = true }
+
+[features]
+# The side panels (git, the list of claude)
+panel = ["dep:zellij-tile"]

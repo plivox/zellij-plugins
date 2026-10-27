@@ -6,7 +6,9 @@
 //!   sends the sessions to the other plugins;
 //! - with `view "list"` (floating, from a key binding): lists the sessions of
 //!   all the zellij sessions, Enter or a click jumps to one, then the
-//!   previous conversations, resumed in a new tab.
+//!   previous conversations, resumed in a new tab. `p` docks it on the right
+//!   (stacked with the git panel when docked too), `docked "true"` starts it
+//!   docked.
 //!
 //! The background instance of each zellij session writes its sessions in the
 //! cache shared by the instances of the plugin; in a zellij session without
@@ -20,8 +22,9 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use common::panel::{Panel, place};
 use common::{
-    EVENT_PIPE, NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
+    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
     status_from_title, topic_from_title, truncate,
 };
 use serde_json::Value;
@@ -61,9 +64,15 @@ enum Item<'a> {
     Past(&'a Past),
 }
 
+/// The list floating: in the middle
+const FLOATING: [&str; 4] = ["10%", "20%", "80%", "60%"];
+
 #[derive(Default)]
 struct State {
     list: bool,
+    /// List: docked at the start, floating or docked
+    docked: bool,
+    panel: Panel,
     permitted: bool,
     /// Background: the name of its zellij session, the projects directory of
     /// Claude Code
@@ -93,6 +102,7 @@ register_plugin!(State);
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.list = configuration.get("view").is_some_and(|view| view == "list");
+        self.docked = configuration.get("docked").is_some_and(|docked| docked == "true");
 
         request_permission(&[
             PermissionType::ReadApplicationState,
@@ -127,11 +137,10 @@ impl ZellijPlugin for State {
                 if self.list {
                     let id = get_plugin_ids().plugin_id;
                     rename_plugin_pane(id, "Claude Code");
-                    let size = |value: &str| Some(value.to_string());
-                    if let Some(coordinates) =
-                        FloatingPaneCoordinates::new(size("10%"), size("20%"), size("80%"), size("60%"), None, None)
-                    {
-                        change_floating_panes_coordinates(vec![(PaneId::Plugin(id), coordinates)]);
+                    if self.docked {
+                        self.panel.toggle();
+                    } else {
+                        place(FLOATING);
                     }
                     pipe_message_to_plugin(MessageToPlugin::new(SYNC_PIPE));
                     self.scan();
@@ -149,6 +158,9 @@ impl ZellijPlugin for State {
                 false
             },
             Event::PaneUpdate(panes) => {
+                if self.list {
+                    self.panel.update(&panes, FLOATING);
+                }
                 self.panes = panes;
                 self.refresh(false);
                 false
@@ -202,11 +214,6 @@ impl ZellijPlugin for State {
             },
             SYNC_PIPE if !self.list => {
                 self.broadcast();
-                false
-            },
-            // From the button of the bar: the floating panes may be hidden
-            OPEN_PIPE if self.list => {
-                show_self(true);
                 false
             },
             STATE_PIPE if self.list => {
@@ -524,6 +531,7 @@ impl State {
                 self.selected = 0;
             },
             BareKey::Char('/') => self.search = Some(String::new()),
+            BareKey::Char('p') => self.panel.toggle(),
             BareKey::Down | BareKey::Char('j') if count > 0 => self.selected = (self.selected + 1) % count,
             BareKey::Up | BareKey::Char('k') if count > 0 => self.selected = (self.selected + count - 1) % count,
             BareKey::Char(digit @ '1'..='9') => {
@@ -540,7 +548,7 @@ impl State {
     }
 
     /// Jumps to the selected session, or resumes the selected conversation
-    /// in a new tab
+    /// in a new tab; closed unless docked
     fn open(&self) {
         match self.items().get(self.selected) {
             Some(Item::Running(session)) => {
@@ -565,7 +573,9 @@ impl State {
             },
             None => return,
         }
-        close_self();
+        if !self.panel.docked() {
+            close_self();
+        }
     }
 
     fn render_list(&mut self, rows: usize, cols: usize) {
@@ -576,7 +586,7 @@ impl State {
         let header = match &self.search {
             Some(search) => format!("\u{1b}[1m/\u{1b}[0m {search}\u{1b}[7m \u{1b}[0m \u{1b}[2m· Enter · Esc\u{1b}[0m"),
             None => format!(
-                "\u{1b}[1m{running} session{}\u{1b}[0m \u{1b}[2m· ↑↓ or 1-9 to jump · / search · Esc\u{1b}[0m",
+                "\u{1b}[1m{running} session{}\u{1b}[0m \u{1b}[2m· ↑↓ or 1-9 to jump · / search · p dock · Esc\u{1b}[0m",
                 if running == 1 { "" } else { "s" }
             ),
         };

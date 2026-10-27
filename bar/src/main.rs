@@ -1,23 +1,27 @@
 //! Status bar, one line: the mode, the session and the tabs on the left, the
-//! Claude Code sessions, a hint and the time on the right.
+//! Git and Claude Code buttons, a hint and the time on the right.
 //!
 //! A click on a tab goes to it, a double click renames it (like the
 //! RenameTab mode: Enter keeps the new name, Esc restores the previous one),
 //! a click on the ✕ of the active tab asks to confirm (a second click within
-//! a few seconds) and closes it. A click on the Claude Code
-//! button (✳ and the sessions by status) opens their list.
+//! a few seconds) and closes it. A click on the Git button opens the git
+//! panel, on the Claude Code button (✳ and the sessions by status) their
+//! list, like their key bindings.
 //!
 //! Configuration (all optional):
 //! - `timezone`: of the time (e.g. Europe/Zurich), else no time
 //! - `hint`: text before the time
-//! - `claude`: URL of the claude plugin, to open its list
+//! - `git`, `claude`: URL of the git and claude plugins, for their buttons
+//! - `git_docked`, `claude_docked`: `true` when their key bindings start them
+//!   docked (the same configuration: the same panel)
 
 use std::collections::{BTreeMap, HashMap};
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status};
+use common::{NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -48,7 +52,10 @@ struct State {
     permitted: bool,
     timezone: Option<Tz>,
     hint: String,
+    git_url: Option<String>,
+    git_docked: bool,
     claude_url: Option<String>,
+    claude_docked: bool,
 
     mode: InputMode,
     session: String,
@@ -72,6 +79,7 @@ enum Target {
     Tab(usize),
     /// Id of the tab to close
     Close(usize),
+    Git,
     Claude,
 }
 
@@ -81,12 +89,18 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.timezone = configuration.get("timezone").and_then(|tz| tz.parse().ok());
         self.hint = configuration.get("hint").cloned().unwrap_or_default();
+        let docked = |name: &str| configuration.get(name).is_some_and(|docked| docked == "true");
+        self.git_url = configuration.get("git").cloned();
+        self.git_docked = docked("git_docked");
         self.claude_url = configuration.get("claude").cloned();
+        self.claude_docked = docked("claude_docked");
 
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::MessageAndLaunchOtherPlugins,
+            // The buttons: zellij action launch-or-focus-plugin
+            PermissionType::RunCommands,
         ]);
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -177,7 +191,17 @@ impl ZellijPlugin for State {
         left.push(&format!(" {}  ", self.session), Some(FROST), None, true);
 
         let mut right = Line::default();
-        let claude = self.claude_summary(&mut right);
+        let mut buttons = vec![];
+        if self.git_url.is_some() {
+            let start = right.width;
+            right.push(" ⎇ ", Some(FROST), Some(POLAR1), true);
+            right.push("Git ", Some(COMMENT), Some(POLAR1), false);
+            buttons.push((start, right.width, Target::Git));
+            right.push("  ", None, None, false);
+        }
+        if let Some((start, end)) = self.claude_summary(&mut right) {
+            buttons.push((start, end, Target::Claude));
+        }
         if !self.hint.is_empty() {
             right.push(&format!("{}  ", self.hint), Some(POLAR3), None, false);
         }
@@ -190,10 +214,8 @@ impl ZellijPlugin for State {
         left.append(tabs);
 
         let space = cols.saturating_sub(left.width + right.width);
-        if let Some((start, end)) = claude {
-            let offset = left.width + space;
-            self.targets.push((offset + start, offset + end, Target::Claude));
-        }
+        let offset = left.width + space;
+        self.targets.extend(buttons.into_iter().map(|(start, end, target)| (offset + start, offset + end, target)));
         print!("{}{:space$}{}", left.text, "", right.text);
     }
 }
@@ -350,7 +372,14 @@ impl State {
                     set_timeout(CONFIRM_CLOSE.as_secs_f64());
                 }
             },
-            Target::Claude => self.open_claude_list(),
+            Target::Git => {
+                let config = if self.git_docked { "docked=true" } else { "" };
+                self.launch(self.git_url.as_deref(), config);
+            },
+            Target::Claude => {
+                let config = if self.claude_docked { "view=list,docked=true" } else { "view=list" };
+                self.launch(self.claude_url.as_deref(), config);
+            },
         }
         true
     }
@@ -367,18 +396,20 @@ impl State {
         rename_tab_with_id(tab.tab_id as u64, "");
     }
 
-    fn open_claude_list(&self) {
-        let Some(url) = &self.claude_url else { return };
+    /// Like their key bindings: the panel of the plugin (with this
+    /// configuration) launched, or moved to the focused tab
+    fn launch(&self, url: Option<&str>, configuration: &str) {
+        let Some(url) = url else { return };
         if !self.permitted {
             return;
         }
-        let config = BTreeMap::from([("view".to_string(), "list".to_string())]);
-        pipe_message_to_plugin(
-            MessageToPlugin::new(OPEN_PIPE)
-                .with_plugin_url(url)
-                .with_plugin_config(config)
-                .new_plugin_instance_should_float(true),
-        );
+        let mut command = vec!["zellij", "action", "launch-or-focus-plugin", "--floating", "--move-to-focused-tab"];
+        if !configuration.is_empty() {
+            command.extend(["--configuration", configuration]);
+        }
+        command.push(url);
+        let env = BTreeMap::from([("ZELLIJ_SESSION_NAME".to_string(), self.session.clone())]);
+        run_command_with_env_variables_and_cwd(&command, env, PathBuf::from("/"), BTreeMap::new());
     }
 }
 
