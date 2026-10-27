@@ -1,0 +1,12 @@
+[package]
+name = "claude"
+description = "Claude Code sessions in zellij: status, tab names and a list to jump to them"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+common = { path = "../common" }
+serde.workspace = true
+serde_json.workspace = true
+zellij-tile.workspace = true
