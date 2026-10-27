@@ -188,6 +188,7 @@ impl ZellijPlugin for State {
                 self.rebuild();
                 true
             },
+            Event::Timer(elapsed) if self.list && self.panel.timer(elapsed) => false,
             Event::Timer(_) if self.list => {
                 self.scan();
                 true

@@ -154,6 +154,7 @@ impl ZellijPlugin for State {
                 }
                 false
             },
+            Event::Timer(elapsed) if self.panel.timer(elapsed) => false,
             Event::Timer(_) => {
                 if self.visible {
                     self.refresh();

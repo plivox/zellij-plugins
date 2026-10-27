@@ -16,8 +16,11 @@ const TABS: [(&str, &str); 2] = [("git", " ⎇ Git "), ("claude", " ✳ Claude "
 /// Docked: the share of the width of the tab, the fewest columns
 const WIDTH_PERCENT: usize = 35;
 const MIN_WIDTH: usize = 40;
-/// Updates to reach the width, at most
-const RESIZES: u8 = 6;
+/// Resizes to reach the width, at most, one at a time: checked on a timer
+/// (they apply late, without a pane update), each waited for this many ticks
+const RESIZES: u8 = 10;
+const TICK: f64 = 0.1;
+const WAITS: u8 = 10;
 /// A click that focuses the panel is not sent to it: the mouse over a tab
 /// this recently counts as a click on it
 const HOVER_CLICK: Duration = Duration::from_millis(800);
@@ -38,9 +41,11 @@ pub struct Panel {
     /// tab (resized again when they change)
     resizes: u8,
     tiled: usize,
-    /// The width when the last resize was asked (one at a time), the width
-    /// of the tabs
+    /// The width when the last resize was asked, the ticks left to wait for
+    /// it, a tick to come; the width of the tabs
     resized: Option<usize>,
+    waits: u8,
+    ticking: bool,
     columns: usize,
     /// Focused, the tab under the mouse (and when)
     focused: bool,
@@ -75,6 +80,10 @@ impl Panel {
         }
         self.toggled = true;
         toggle_pane_embed_or_eject_for_pane_id(PaneId::Plugin(get_plugin_ids().plugin_id));
+        // Docked: sized without waiting for its update (sent late)
+        if self.floating == Some(true) {
+            self.resize();
+        }
     }
 
     /// The width of the tabs, from their update
@@ -98,6 +107,66 @@ impl Panel {
         if let Some(name) = tab_at(column).filter(|name| line == 0 && *name != self.name) {
             switch(name);
         }
+    }
+
+    /// A timer of the panel (shorter than the ones of the plugins): sizes it
+    pub fn timer(&mut self, elapsed: f64) -> bool {
+        if !self.ticking || elapsed >= 1.0 {
+            return false;
+        }
+        self.ticking = false;
+        self.size();
+        true
+    }
+
+    /// Its width again, soon (the layout settled)
+    fn resize(&mut self) {
+        self.resizes = RESIZES;
+        self.resized = None;
+        self.waits = WAITS;
+        self.tick();
+    }
+
+    fn tick(&mut self) {
+        if !self.ticking {
+            self.ticking = true;
+            set_timeout(TICK);
+        }
+    }
+
+    /// One resize toward its width, once the last one is applied
+    fn size(&mut self) {
+        let me = get_pane_info(PaneId::Plugin(get_plugin_ids().plugin_id));
+        let width = me.filter(|me| !me.is_floating).map(|me| me.pane_columns);
+        // Not docked yet, the width of the tabs not known, the last resize
+        // not applied
+        let Some(width) = width.filter(|width| self.columns > 0 && self.resized != Some(*width)) else {
+            if self.waits > 0 && self.resizes > 0 {
+                self.waits -= 1;
+                self.tick();
+            }
+            return;
+        };
+        if self.resizes == 0 {
+            return;
+        }
+        let total = self.columns;
+        let target = (total * WIDTH_PERCENT / 100).max(MIN_WIDTH).min(total / 2);
+        // A resize moves the border by 5% of the width
+        let step = (total / 20).max(1);
+        if width.abs_diff(target) <= step / 2 {
+            self.resizes = 0;
+            return;
+        }
+        self.resizes -= 1;
+        self.resized = Some(width);
+        self.waits = WAITS;
+        let resize = if width > target { Resize::Decrease } else { Resize::Increase };
+        resize_pane_with_id(
+            ResizeStrategy::new(resize, Some(Direction::Left)),
+            PaneId::Plugin(get_plugin_ids().plugin_id),
+        );
+        self.tick();
     }
 
     /// Docked: sized; floating: placed at `coordinates` (x, y, width,
@@ -126,35 +195,9 @@ impl Panel {
         // swap layout)
         let tiled = panes.iter().filter(|p| !p.is_floating && p.is_selectable).count();
         if !floating && tiled != self.tiled {
-            self.resizes = RESIZES;
+            self.resize();
         }
         self.tiled = tiled;
-        // Waits for the last resize (a few updates at most: the resizes left)
-        let waiting = self.resized == Some(me.pane_columns) && self.resizes > 0;
-        if waiting {
-            self.resizes -= 1;
-        } else if !floating && self.resizes > 0 && self.columns > 0 {
-            self.resizes -= 1;
-            let total = self.columns;
-            let target = (total * WIDTH_PERCENT / 100).max(MIN_WIDTH).min(total / 2);
-            // A resize moves the border by 5% of the width
-            let step = (total / 20).max(1);
-            let width = me.pane_columns;
-            let (resize, steps) = if width > target {
-                (Resize::Decrease, (width - target + step / 2) / step)
-            } else {
-                (Resize::Increase, (target - width + step / 2) / step)
-            };
-            if steps == 0 {
-                self.resized = None;
-                self.resizes = 0;
-            } else {
-                self.resized = Some(width);
-                for _ in 0..steps {
-                    resize_pane_with_id(ResizeStrategy::new(resize, Some(Direction::Left)), PaneId::Plugin(id));
-                }
-            }
-        }
         let titles = PANELS.map(|(_, title)| title);
         self.other = panes
             .iter()
@@ -180,7 +223,7 @@ impl Panel {
             place(coordinates);
         }
         if !floating {
-            self.resizes = RESIZES;
+            self.resize();
         }
         self.toggled = false;
         self.floating = Some(floating);
