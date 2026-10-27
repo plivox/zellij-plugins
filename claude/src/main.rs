@@ -151,13 +151,13 @@ impl State {
         };
 
         let (status, tool, notice) = match event {
-            "SessionStart" | "Stop" => (Status::Idle, None, None),
-            "UserPromptSubmit" | "PostToolUse" => (Status::Working, None, None),
+            "SessionStart" | "Stop" | "StopFailure" => (Status::Idle, None, None),
+            "UserPromptSubmit" | "PostToolUse" | "PostToolUseFailure" | "PermissionDenied" => {
+                (Status::Working, None, None)
+            },
             "PreToolUse" => (Status::Working, input["tool_name"].as_str(), None),
             "PermissionRequest" => (Status::Waiting, input["tool_name"].as_str(), None),
-            // Waiting for the next prompt is not waiting for an answer
-            "Notification" if input["notification_type"] == "idle_prompt" => return,
-            "Notification" => (Status::Waiting, None, input["message"].as_str()),
+            "Notification" if needs_answer(&input) => (Status::Waiting, None, input["message"].as_str()),
             _ => return,
         };
 
@@ -337,6 +337,17 @@ impl State {
             let selected = if index == self.selected { "\u{1b}[7m" } else { "" };
             println!("{selected}\u{1b}[{color}m{}\u{1b}[39m {line}\u{1b}[0m", session.status.icon());
         }
+    }
+}
+
+/// A notification asking for a permission or an answer; not the others
+/// (waiting for the next prompt, authentication, agent completed...)
+fn needs_answer(input: &Value) -> bool {
+    match input["notification_type"].as_str() {
+        Some(kind) => {
+            matches!(kind, "permission_prompt" | "elicitation_dialog" | "elicitation_url_dialog" | "agent_needs_input")
+        },
+        None => !input["message"].as_str().unwrap_or_default().contains("waiting for your input"),
     }
 }
 
