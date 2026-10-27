@@ -11,8 +11,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::{
-    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable,
-    topic_from_title, truncate,
+    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, topic_from_title, truncate,
 };
 use serde_json::Value;
 use zellij_tile::prelude::*;
@@ -196,10 +195,7 @@ impl State {
 
         for session in self.sessions.values_mut() {
             let pane = self.panes.panes.iter().find_map(|(position, panes)| {
-                panes
-                    .iter()
-                    .find(|pane| !pane.is_plugin && pane.id == session.pane_id)
-                    .map(|pane| (*position, pane))
+                panes.iter().find(|pane| !pane.is_plugin && pane.id == session.pane_id).map(|pane| (*position, pane))
             });
             match pane {
                 Some((position, pane)) => {
@@ -242,21 +238,15 @@ impl State {
 
         for (tab_id, session) in chosen {
             let Some(tab) = self.tabs.iter().find(|tab| tab.tab_id == tab_id) else { continue };
-            let name = format!(
-                "{} {}{}",
-                session.status.icon(),
-                truncate(session.title(), TAB_TOPIC_LENGTH),
-                NAME_MARKER
-            );
+            let name =
+                format!("{} {}{}", session.status.icon(), truncate(session.title(), TAB_TOPIC_LENGTH), NAME_MARKER);
             // A tab never renamed shows the title of its focused pane
             let untitled = self
                 .panes
                 .panes
                 .get(&tab.position)
                 .is_some_and(|panes| panes.iter().any(|pane| pane.title == tab.name));
-            if tab.name == name
-                || !(untitled || is_renamable(&tab.name))
-                || self.tab_names.get(&tab_id) == Some(&name)
+            if tab.name == name || !(untitled || is_renamable(&tab.name)) || self.tab_names.get(&tab_id) == Some(&name)
             {
                 continue;
             }

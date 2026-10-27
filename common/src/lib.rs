@@ -96,9 +96,7 @@ pub fn truncate(text: &str, max: usize) -> String {
 /// they set.
 pub fn is_renamable(tab_name: &str) -> bool {
     tab_name.ends_with(NAME_MARKER)
-        || tab_name
-            .strip_prefix("Tab #")
-            .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
+        || tab_name.strip_prefix("Tab #").is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()))
 }
 
 #[cfg(test)]

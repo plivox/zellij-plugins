@@ -1,10 +1,13 @@
 [package]
 name = "bar"
+description = "Status bar: mode, session, tabs (double click to rename), Claude Code sessions and time"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
 common = { path = "../common" }
 serde_json.workspace = true
 zellij-tile.workspace = true
