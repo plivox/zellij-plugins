@@ -1,14 +1,20 @@
 //! Status bar, one line: the mode, the session and the tabs on the left, the
-//! Git and Claude Code buttons, a hint and the time on the right.
+//! Git and Claude Code buttons, a hint and the time on the right. Or split in
+//! two bars: the tabs (`view "tabs"`), the rest (`view "status"`).
 //!
 //! A click on a tab goes to it, a double click renames it (like the
 //! RenameTab mode: Enter keeps the new name, Esc restores the previous one),
 //! a click on the ✕ of the active tab asks to confirm (a second click within
 //! a few seconds) and closes it. A click on the Git button opens the git
 //! panel, on the Claude Code button (✳ and the sessions by status) their
-//! list, like their key bindings.
+//! list, like their key bindings. A double click on the session renames it
+//! (Enter keeps the new name, Esc cancels).
+//!
+//! The tabs of the panels (git, claude) show one in place of the other
+//! through the bar of their tab, which knows their URLs.
 //!
 //! Configuration (all optional):
+//! - `view`: `tabs` or `status` for a split bar, else both
 //! - `timezone`: of the time (e.g. Europe/Zurich), else no time
 //! - `hint`: text before the time
 //! - `git`, `claude`: URL of the git and claude plugins, for their buttons
@@ -21,7 +27,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status};
+use common::{NAME_MARKER, STATE_PIPE, SWITCH_PIPE, SYNC_PIPE, Session, Status};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -47,9 +53,18 @@ const YELLOW: Rgb = (0xEB, 0xCB, 0x8B);
 const GREEN: Rgb = (0xA3, 0xBE, 0x8C);
 const PURPLE: Rgb = (0xB4, 0x8E, 0xAD);
 
+#[derive(Default, PartialEq)]
+enum View {
+    #[default]
+    All,
+    Tabs,
+    Status,
+}
+
 #[derive(Default)]
 struct State {
     permitted: bool,
+    view: View,
     timezone: Option<Tz>,
     hint: String,
     git_url: Option<String>,
@@ -61,12 +76,19 @@ struct State {
     session: String,
     tabs: Vec<TabInfo>,
     sessions: Vec<Session>,
+    /// The position of the tab of this bar
+    tab: Option<usize>,
 
     /// Clickable ranges of the last render: (first column, end column, target)
     targets: Vec<(usize, usize, Target)>,
     last_click: Option<(usize, SystemTime)>,
     /// A rename started by a double click
     renaming: bool,
+    /// The last click on the session; its new name typed, the pane focused
+    /// before
+    session_click: Option<SystemTime>,
+    session_name: Option<String>,
+    focused_before: Option<PaneId>,
     /// The tab to close on a second click on its button, until this time
     close: Option<(usize, SystemTime)>,
     /// Unix time of the next minute, when the clock timer fires
@@ -79,6 +101,7 @@ enum Target {
     Tab(usize),
     /// Id of the tab to close
     Close(usize),
+    Session,
     Git,
     Claude,
 }
@@ -89,6 +112,11 @@ impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
         self.timezone = configuration.get("timezone").and_then(|tz| tz.parse().ok());
         self.hint = configuration.get("hint").cloned().unwrap_or_default();
+        self.view = match configuration.get("view").map(String::as_str) {
+            Some("tabs") => View::Tabs,
+            Some("status") => View::Status,
+            _ => View::All,
+        };
         let docked = |name: &str| configuration.get(name).is_some_and(|docked| docked == "true");
         self.git_url = configuration.get("git").cloned();
         self.git_docked = docked("git_docked");
@@ -106,7 +134,9 @@ impl ZellijPlugin for State {
             EventType::PermissionRequestResult,
             EventType::ModeUpdate,
             EventType::TabUpdate,
+            EventType::PaneUpdate,
             EventType::Mouse,
+            EventType::Key,
             EventType::Timer,
         ]);
         set_selectable(false);
@@ -140,6 +170,16 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
                 changed
             },
+            Event::PaneUpdate(manifest) => {
+                let id = get_plugin_ids().plugin_id;
+                self.tab = manifest
+                    .panes
+                    .iter()
+                    .find(|(_, panes)| panes.iter().any(|p| p.is_plugin && p.id == id))
+                    .map(|(tab, _)| *tab);
+                false
+            },
+            Event::Key(key) => self.session_key(key),
             Event::Mouse(Mouse::LeftClick(_, column)) => self.click(column),
             Event::Mouse(Mouse::ScrollUp(_)) => {
                 go_to_previous_tab();
@@ -173,6 +213,17 @@ impl ZellijPlugin for State {
                 },
                 _ => false,
             },
+            // From a panel of the tab of this bar: the other in its place
+            SWITCH_PIPE
+                if self.tab.is_some() && self.tab == self.tabs.iter().find(|t| t.active).map(|t| t.position) =>
+            {
+                match message.payload.as_deref() {
+                    Some("git") => self.launch(self.git_url.as_deref(), &self.git_config(), true),
+                    Some("claude") => self.launch(self.claude_url.as_deref(), &self.claude_config(), true),
+                    _ => {},
+                }
+                false
+            },
             CLICK_PIPE => {
                 if let Some(position) = message.payload.as_deref().and_then(|p| p.parse().ok()) {
                     self.last_click = Some((position, SystemTime::now()));
@@ -186,32 +237,45 @@ impl ZellijPlugin for State {
     fn render(&mut self, _rows: usize, cols: usize) {
         self.targets.clear();
 
+        let status = self.view != View::Tabs;
         let mut left = Line::default();
-        left.push(&format!(" {} ", mode_name(self.mode)), Some(POLAR0), Some(mode_color(self.mode)), true);
-        left.push(&format!(" {}  ", self.session), Some(FROST), None, true);
+        let mut buttons = vec![];
+        if status {
+            left.push(&format!(" {} ", mode_name(self.mode)), Some(POLAR0), Some(mode_color(self.mode)), true);
+            let start = left.width;
+            match &self.session_name {
+                Some(name) => left.push(&format!(" {name}▏"), Some(POLAR0), Some(YELLOW), true),
+                None => left.push(&format!(" {} ", self.session), Some(FROST), None, true),
+            }
+            self.targets.push((start, left.width, Target::Session));
+            left.push(" ", None, None, false);
+        }
 
         let mut right = Line::default();
-        let mut buttons = vec![];
-        if self.git_url.is_some() {
+        if status && self.git_url.is_some() {
             let start = right.width;
             right.push(" ⎇ ", Some(FROST), Some(POLAR1), true);
             right.push("Git ", Some(COMMENT), Some(POLAR1), false);
             buttons.push((start, right.width, Target::Git));
             right.push("  ", None, None, false);
         }
-        if let Some((start, end)) = self.claude_summary(&mut right) {
-            buttons.push((start, end, Target::Claude));
-        }
-        if !self.hint.is_empty() {
-            right.push(&format!("{}  ", self.hint), Some(POLAR3), None, false);
-        }
-        if let Some(time) = self.time() {
-            right.push(&format!("{time} "), Some(POLAR3), None, false);
+        if status {
+            if let Some((start, end)) = self.claude_summary(&mut right) {
+                buttons.push((start, end, Target::Claude));
+            }
+            if !self.hint.is_empty() {
+                right.push(&format!("{}  ", self.hint), Some(POLAR3), None, false);
+            }
+            if let Some(time) = self.time() {
+                right.push(&format!("{time} "), Some(POLAR3), None, false);
+            }
         }
 
-        let room = cols.saturating_sub(left.width + right.width);
-        let tabs = self.tabs_line(left.width, room);
-        left.append(tabs);
+        if self.view != View::Status {
+            let room = cols.saturating_sub(left.width + right.width);
+            let tabs = self.tabs_line(left.width, room);
+            left.append(tabs);
+        }
 
         let space = cols.saturating_sub(left.width + right.width);
         let offset = left.width + space;
@@ -346,6 +410,9 @@ impl State {
         // Any other click cancels a close
         let close = self.close.take();
         let Some(target) = target else { return close.is_some() };
+        if target != Target::Session {
+            self.session_click = None;
+        }
         match target {
             Target::Tab(position) => {
                 let now = SystemTime::now();
@@ -372,14 +439,19 @@ impl State {
                     set_timeout(CONFIRM_CLOSE.as_secs_f64());
                 }
             },
-            Target::Git => {
-                let config = if self.git_docked { "docked=true" } else { "" };
-                self.launch(self.git_url.as_deref(), config);
+            Target::Session => {
+                let now = SystemTime::now();
+                let double = self
+                    .session_click
+                    .is_some_and(|time| now.duration_since(time).is_ok_and(|elapsed| elapsed < DOUBLE_CLICK));
+                self.session_click = Some(now);
+                if double && self.session_name.is_none() {
+                    self.session_click = None;
+                    self.rename_session();
+                }
             },
-            Target::Claude => {
-                let config = if self.claude_docked { "view=list,docked=true" } else { "view=list" };
-                self.launch(self.claude_url.as_deref(), config);
-            },
+            Target::Git => self.launch(self.git_url.as_deref(), &self.git_config(), false),
+            Target::Claude => self.launch(self.claude_url.as_deref(), &self.claude_config(), false),
         }
         true
     }
@@ -396,14 +468,71 @@ impl State {
         rename_tab_with_id(tab.tab_id as u64, "");
     }
 
+    /// Typed in the bar: focused, the keys come to it
+    fn rename_session(&mut self) {
+        if !self.permitted {
+            return;
+        }
+        self.focused_before = get_focused_pane_info().ok().map(|(_, pane)| pane);
+        self.session_name = Some(String::new());
+        set_selectable(true);
+        focus_plugin_pane(get_plugin_ids().plugin_id, false, false);
+    }
+
+    /// A key of the session rename; returns whether to render again
+    fn session_key(&mut self, key: KeyWithModifier) -> bool {
+        let Some(name) = &mut self.session_name else { return false };
+        match key.bare_key {
+            BareKey::Char(c) if key.key_modifiers.is_empty() || key.key_modifiers.contains(&KeyModifier::Shift) => {
+                name.push(c)
+            },
+            BareKey::Backspace => {
+                name.pop();
+            },
+            BareKey::Enter => {
+                if !name.trim().is_empty() {
+                    rename_session(name.trim());
+                }
+                self.end_session_rename();
+            },
+            BareKey::Esc => self.end_session_rename(),
+            _ => return false,
+        }
+        true
+    }
+
+    fn end_session_rename(&mut self) {
+        self.session_name = None;
+        set_selectable(false);
+        if let Some(pane) = self.focused_before.take() {
+            focus_pane_with_id(pane, false, false);
+        }
+    }
+
+    /// The configurations of the key bindings of the panels (the same: the
+    /// same panel)
+    fn git_config(&self) -> String {
+        if self.git_docked { "docked=true" } else { "" }.to_string()
+    }
+
+    fn claude_config(&self) -> String {
+        if self.claude_docked { "view=list,docked=true" } else { "view=list" }.to_string()
+    }
+
     /// Like their key bindings: the panel of the plugin (with this
-    /// configuration) launched, or moved to the focused tab
-    fn launch(&self, url: Option<&str>, configuration: &str) {
+    /// configuration) launched, or moved to the focused tab; or in place of
+    /// the focused pane (the other panel), closed
+    fn launch(&self, url: Option<&str>, configuration: &str, in_place: bool) {
         let Some(url) = url else { return };
         if !self.permitted {
             return;
         }
-        let mut command = vec!["zellij", "action", "launch-or-focus-plugin", "--floating", "--move-to-focused-tab"];
+        let mut command = vec!["zellij", "action", "launch-or-focus-plugin"];
+        if in_place {
+            command.extend(["--in-place", "--close-replaced-pane"]);
+        } else {
+            command.extend(["--floating", "--move-to-focused-tab"]);
+        }
         if !configuration.is_empty() {
             command.extend(["--configuration", configuration]);
         }

@@ -14,6 +14,10 @@ pub const STATE_PIPE: &str = "claude::state";
 /// To the claude plugin: asks for the sessions, sent again on STATE_PIPE.
 pub const SYNC_PIPE: &str = "claude::sync";
 
+/// From the panels to the bars: the panel to show in place of the focused
+/// one (its name: git or claude).
+pub const SWITCH_PIPE: &str = "panel::switch";
+
 /// Ends the tab names set by the plugins (and by the zellij module of
 /// Prezto): a tab without it was renamed by hand and is left alone.
 pub const NAME_MARKER: char = '\u{200b}';

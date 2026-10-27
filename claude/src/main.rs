@@ -6,9 +6,9 @@
 //!   sends the sessions to the other plugins;
 //! - with `view "list"` (floating, from a key binding): lists the sessions of
 //!   all the zellij sessions, Enter or a click jumps to one, then the
-//!   previous conversations, resumed in a new tab. `p` docks it on the right
-//!   (stacked with the git panel when docked too), `docked "true"` starts it
-//!   docked.
+//!   previous conversations, resumed in a new tab. `p` docks it on the right,
+//!   `docked "true"` starts it docked; Tab (or its tab) shows the git panel
+//!   in its place.
 //!
 //! The background instance of each zellij session writes its sessions in the
 //! cache shared by the instances of the plugin; in a zellij session without
@@ -22,7 +22,7 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use common::panel::{Panel, place};
+use common::panel::{self, Panel};
 use common::{
     EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
     status_from_title, topic_from_title, truncate,
@@ -33,7 +33,7 @@ use zellij_tile::prelude::*;
 /// Longest conversation topic in a tab name
 const TAB_TOPIC_LENGTH: usize = 30;
 /// Lines above the sessions in the list
-const LIST_HEADER: usize = 2;
+const LIST_HEADER: usize = 3;
 /// Seconds between two reads of the zellij sessions by the list
 const SCAN_INTERVAL: f64 = 2.0;
 /// The sessions of each zellij session (<name>.json), shared by the instances
@@ -122,6 +122,7 @@ impl ZellijPlugin for State {
                 EventType::SessionUpdate,
                 EventType::Timer,
                 EventType::HostFolderChanged,
+                EventType::RunCommandResult,
             ]);
         } else {
             events.push(EventType::SessionUpdate);
@@ -137,15 +138,17 @@ impl ZellijPlugin for State {
                 if self.list {
                     let id = get_plugin_ids().plugin_id;
                     rename_plugin_pane(id, "Claude Code");
-                    if self.docked {
-                        self.panel.toggle();
-                    } else {
-                        place(FLOATING);
-                    }
+                    self.panel = Panel::new("claude");
+                    self.panel.start(self.docked);
                     pipe_message_to_plugin(MessageToPlugin::new(SYNC_PIPE));
                     self.scan();
-                    if let Ok(projects) = fs::read_to_string(PROJECTS_FILE) {
-                        change_host_folder(PathBuf::from(projects.trim()));
+                    match fs::read_to_string(PROJECTS_FILE) {
+                        Ok(projects) => change_host_folder(PathBuf::from(projects.trim())),
+                        // No event of the hook yet: the default directory
+                        Err(_) => run_command(
+                            &["sh", "-c", "echo \"${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects\""],
+                            BTreeMap::new(),
+                        ),
                     }
                 } else {
                     self.broadcast();
@@ -186,12 +189,22 @@ impl ZellijPlugin for State {
                 self.scan();
                 true
             },
+            Event::RunCommandResult(Some(0), stdout, _, _) if self.list => {
+                change_host_folder(PathBuf::from(String::from_utf8_lossy(&stdout).trim()));
+                false
+            },
             Event::HostFolderChanged(_) if self.list => {
                 self.history();
                 self.clamp();
                 true
             },
             Event::Key(key) if self.list => self.key(key),
+            Event::Mouse(Mouse::LeftClick(0, column)) if self.list => {
+                if let Some(name) = panel::tab_at(column).filter(|name| *name != "claude") {
+                    panel::switch(name);
+                }
+                false
+            },
             Event::Mouse(Mouse::LeftClick(line, _)) if self.list => {
                 let row = (line.max(0) as usize).checked_sub(LIST_HEADER);
                 if let Some(index) = row.and_then(|row| self.lines.get(row).copied().flatten()) {
@@ -532,6 +545,7 @@ impl State {
             },
             BareKey::Char('/') => self.search = Some(String::new()),
             BareKey::Char('p') => self.panel.toggle(),
+            BareKey::Tab => panel::switch(panel::other("claude")),
             BareKey::Down | BareKey::Char('j') if count > 0 => self.selected = (self.selected + 1) % count,
             BareKey::Up | BareKey::Char('k') if count > 0 => self.selected = (self.selected + count - 1) % count,
             BareKey::Char(digit @ '1'..='9') => {
@@ -583,13 +597,17 @@ impl State {
         let items = self.items();
         let running = items.iter().filter(|item| matches!(item, Item::Running(_))).count();
 
-        let header = match &self.search {
-            Some(search) => format!("\u{1b}[1m/\u{1b}[0m {search}\u{1b}[7m \u{1b}[0m \u{1b}[2m· Enter · Esc\u{1b}[0m"),
-            None => format!(
-                "\u{1b}[1m{running} session{}\u{1b}[0m \u{1b}[2m· ↑↓ or 1-9 to jump · / search · p dock · Esc\u{1b}[0m",
-                if running == 1 { "" } else { "s" }
+        // Bold, then dimmed, within the width (a longer line would wrap)
+        let (bold, dim) = match &self.search {
+            Some(search) => (format!("/ {search}▏"), " · Enter · Esc".to_string()),
+            None => (
+                format!("{running} session{}", if running == 1 { "" } else { "s" }),
+                " · ↑↓ or 1-9 to jump · / search · Tab git · p dock · Esc".to_string(),
             ),
         };
+        let bold = truncate(&bold, cols);
+        let dim = truncate(&dim, cols.saturating_sub(bold.chars().count()));
+        let header = format!("\u{1b}[1m{bold}\u{1b}[0m\u{1b}[2m{dim}\u{1b}[0m");
 
         // The entry of each line; None: the title of the previous conversations
         let mut lines = vec![];
@@ -660,7 +678,9 @@ impl State {
             let zellij =
                 if several { format!("{:<zellij_width$}  ", truncate(zellij, zellij_width)) } else { String::new() };
             let left = format!("{number} {zellij}{:<project_width$}  ", truncate(project, project_width));
-            let right = format!("  {:<24}  {:>3}", truncate(&detail, 24), age);
+            // Narrow (docked): without the detail
+            let right =
+                if cols >= 80 { format!("  {:<24}  {:>3}", truncate(&detail, 24), age) } else { format!("  {age:>3}") };
             let room = cols.saturating_sub(2 + left.chars().count() + right.chars().count());
             let title = truncate(title, room);
             let space = room - title.chars().count();
@@ -680,7 +700,7 @@ impl State {
             output.push(format!("\u{1b}[2mNo Claude Code session{found}\u{1b}[0m"));
         }
         // Without a newline after the last line: the pane would scroll
-        print!("{header}\n\n{}", output.join("\n"));
+        print!("{}\n{header}\n\n{}", panel::tabs("claude"), output.join("\n"));
     }
 }
 

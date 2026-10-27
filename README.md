@@ -10,12 +10,15 @@
   and Claude Code buttons and the time. A click on a tab goes to it, a double
   click renames it, its `✕` closes the active tab (a second click confirms);
   the Git button opens the git panel, the Claude Code button (`✳` and the
-  sessions by status) their list.
+  sessions by status) their list; a double click on the session renames it.
+  It can be split in two: the tabs on top, the rest at the bottom.
 - **git**: the git changes of the focused pane, in a floating panel: staged,
   not staged, untracked, in conflict, with the lines added and removed. Enter
   shows a diff, `s` stages or unstages a file, `g` opens lazygit, `p` docks
-  it on the right. Docked, the git panel and the list of claude are stacked
-  together.
+  it on the right.
+
+The git panel and the list of claude are side panels: one at a time, their
+tabs on the first line (or Tab) show the other in place.
 
 The release has the plugins, the Claude Code hook (`claude-hook.sh`) and
 their SHA256 (`sha256sums.txt`).
@@ -35,7 +38,8 @@ The list, from a key binding: the sessions, then the previous conversations
 (the latest transcripts of Claude Code), resumed in a new tab
 (`claude --resume`, in their directory). `↑↓`/`jk` and Enter, a digit or a
 click opens one, `/` searches (each word, in the project and the title), `p`
-docks the list on the right (it then stays open), Esc closes. With
+docks the list on the right (it then stays open), Tab shows the git panel in
+its place, Esc closes. With
 `docked "true"` in its configuration, it starts docked:
 
 ```kdl
@@ -94,12 +98,18 @@ layout {
 }
 ```
 
+Split in two bars, the tabs on top and the rest at the bottom:
+`view "tabs"` and `view "status"` (the buttons and the time go to the
+second).
+
 All optional: `timezone` of the time (no time without it), `hint` before the
 time, `git` and `claude` the URLs of the plugins, for their buttons.
 The buttons open the panels like their key bindings
 (`zellij action launch-or-focus-plugin`), with the same configuration:
 `git_docked "true"`, `claude_docked "true"` when the key bindings have
-`docked "true"`.
+`docked "true"`. A double click on the session renames it (Enter keeps the
+new name, Esc cancels). The tabs of the panels go through the bar, which knows
+their URLs: `zellij action launch-or-focus-plugin --in-place`.
 
 Permissions: `ReadApplicationState`, `ChangeApplicationState`,
 `MessageAndLaunchOtherPlugins`, `RunCommands` (the buttons).
@@ -122,11 +132,12 @@ every 2 seconds while shown. `↑↓`/`jk` select a file, Enter (or a click) sho
 its diff in a floating pane (Ctrl-c closes it), `s` or Space stages or
 unstages it, `g` opens [lazygit](https://github.com/jesseduffield/lazygit),
 `r` reads again, `p` docks the panel on the right (in the tiled panes, a
-third of the width, stacked with the list of claude when docked too) or
-floats it again, Esc closes it. With `docked "true"`
+third of the width) or floats it again, Tab shows the list of claude in its
+place, Esc closes it. With `docked "true"`
 in its configuration, it starts docked.
 
-Permissions: `ReadApplicationState`, `ChangeApplicationState`, `RunCommands`.
+Permissions: `ReadApplicationState`, `ChangeApplicationState`, `RunCommands`,
+`MessageAndLaunchOtherPlugins` (the tabs of the panels).
 
 ## Build
 

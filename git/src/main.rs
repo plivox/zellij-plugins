@@ -4,20 +4,20 @@
 //! changes: staged, not staged, untracked, in conflict, with the lines added
 //! and removed. Enter (or a click) shows the diff of a file, `s` stages or
 //! unstages it, `g` opens lazygit, `p` docks the panel on the right (in the
-//! tiled panes, stacked with the list of claude when docked too) or floats it
-//! again, Esc closes it.
+//! tiled panes) or floats it again, Tab (or its tab) shows the list of claude
+//! in its place, Esc closes it.
 //!
 //! Configuration: `docked "true"` to start docked.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use common::panel::{Panel, place};
+use common::panel::{self, Panel};
 use common::truncate;
 use zellij_tile::prelude::*;
 
 /// Lines above the files
-const HEADER: usize = 2;
+const HEADER: usize = 3;
 /// Seconds between two reads of the changes while the panel is visible
 const REFRESH_INTERVAL: f64 = 2.0;
 /// Floating: on the right
@@ -96,6 +96,8 @@ impl ZellijPlugin for State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::RunCommands,
+            // The tabs of the panels, through the bar
+            PermissionType::MessageAndLaunchOtherPlugins,
         ]);
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -116,11 +118,8 @@ impl ZellijPlugin for State {
                 self.permitted = true;
                 self.visible = true;
                 rename_plugin_pane(get_plugin_ids().plugin_id, "Git");
-                if self.docked {
-                    self.panel.toggle();
-                } else {
-                    place(FLOATING);
-                }
+                self.panel = Panel::new("git");
+                self.panel.start(self.docked);
                 self.follow_cwd();
                 set_timeout(REFRESH_INTERVAL);
                 true
@@ -163,6 +162,12 @@ impl ZellijPlugin for State {
             },
             Event::RunCommandResult(code, stdout, stderr, context) => self.result(code, &stdout, &stderr, &context),
             Event::Key(key) => self.key(key),
+            Event::Mouse(Mouse::LeftClick(0, column)) => {
+                if let Some(name) = panel::tab_at(column).filter(|name| *name != "git") {
+                    panel::switch(name);
+                }
+                false
+            },
             Event::Mouse(Mouse::LeftClick(line, _)) => {
                 let row = (line.max(0) as usize).checked_sub(HEADER);
                 if let Some(index) = row.and_then(|row| self.lines.get(row).copied().flatten()) {
@@ -302,6 +307,7 @@ impl State {
             BareKey::Char('s') | BareKey::Char(' ') => self.stage(),
             BareKey::Char('g') => self.open(CommandToRun::new("lazygit")),
             BareKey::Char('r') => self.refresh(),
+            BareKey::Tab => panel::switch(panel::other("git")),
             BareKey::Char('p') => self.panel.toggle(),
             BareKey::Esc | BareKey::Char('q') => close_self(),
             _ => return false,
@@ -358,8 +364,12 @@ impl State {
             format!("\u{1b}[1m{project}\u{1b}[0m \u{1b}[36m⎇ {}\u{1b}[0m", truncate(&branch(&self.branch), width / 2))
         };
         let mut output = vec![
+            panel::tabs("git"),
             title,
-            format!("\u{1b}[2m{}\u{1b}[0m", truncate("⏎ diff · s stage · g lazygit · p dock · Esc", width)),
+            format!(
+                "\u{1b}[2m{}\u{1b}[0m",
+                truncate("⏎ diff · s stage · g lazygit · Tab claude · p dock · Esc", width)
+            ),
         ];
 
         if let Some(error) = &self.error {
