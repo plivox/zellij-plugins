@@ -5,7 +5,7 @@
 - **claude**: the [Claude Code](https://claude.com/claude-code) sessions of all the
   zellij sessions. Their tabs are named after the conversation, with its status
   (`⚙` working, `⚠` waiting for a permission or an answer, `✓` done), and a
-  floating list jumps to any of them.
+  floating list jumps to any of them or resumes a previous conversation.
 - **bar**: a one-line status bar: the mode, the session, the tabs, the Claude
   Code sessions and the time. A click on a tab goes to it, a double click
   renames it, a click on the Claude Code sessions opens their list.
@@ -24,8 +24,11 @@ load_plugins {
 }
 ```
 
-The list, from a key binding (`↑↓`/`jk` and Enter, a digit or a click jumps to
-a session, Esc closes):
+The list, from a key binding: the sessions, then the previous conversations
+(the latest transcripts of Claude Code), resumed in a new tab
+(`claude --resume`, in their directory). `↑↓`/`jk` and Enter, a digit or a
+click opens one, `/` searches (each word, in the project and the title), Esc
+closes:
 
 ```kdl
 bind "Alt l" {
@@ -54,11 +57,15 @@ The hook, in `~/.claude/settings.json`, for the events of the plugin:
 }
 ```
 
+The transcripts are read in the projects directory of Claude Code, known from
+the first event of the hook (`transcript_path`).
+
 A tab is renamed only if it has a default name or one set by the plugins
 (ending with a zero-width space): a tab renamed by hand is left alone.
 
 Permissions: `ReadApplicationState`, `ChangeApplicationState`,
-`ReadCliPipes`, `MessageAndLaunchOtherPlugins`.
+`ReadCliPipes`, `MessageAndLaunchOtherPlugins`, `FullHdAccess` (the
+transcripts), `RunCommands` (`claude --resume`).
 
 ## bar
 

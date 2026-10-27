@@ -68,15 +68,25 @@ pub struct Session {
 }
 
 impl Session {
-    /// Last component of the working directory
     pub fn project(&self) -> &str {
-        self.cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(&self.cwd)
+        project(&self.cwd)
     }
 
     /// The topic, else the project
     pub fn title(&self) -> &str {
         if self.topic.is_empty() { self.project() } else { &self.topic }
     }
+}
+
+/// Last component of a working directory
+pub fn project(cwd: &str) -> &str {
+    cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd)
+}
+
+/// Whether each word of the search is in the text, ignoring the case
+pub fn search_match(search: &str, text: &str) -> bool {
+    let text = text.to_lowercase();
+    search.to_lowercase().split_whitespace().all(|word| text.contains(word))
 }
 
 /// The pane title without the status prefix of Claude Code (✳ when waiting,
@@ -139,6 +149,13 @@ mod tests {
         assert!(is_renamable("⚙ Fix login bug\u{200b}"));
         assert!(!is_renamable("Tab #"));
         assert!(!is_renamable("work"));
+    }
+
+    #[test]
+    fn search() {
+        assert!(search_match("zell PLUG", "Homesible: zellij plugins"));
+        assert!(search_match("", "Homesible"));
+        assert!(!search_match("ovile", "Avis sur platform"));
     }
 
     #[test]

@@ -5,19 +5,24 @@
 //!   of the Claude Code hook, names their tabs after the conversation and
 //!   sends the sessions to the other plugins;
 //! - with `view "list"` (floating, from a key binding): lists the sessions of
-//!   all the zellij sessions, Enter or a click jumps to one.
+//!   all the zellij sessions, Enter or a click jumps to one, then the
+//!   previous conversations, resumed in a new tab.
 //!
 //! The background instance of each zellij session writes its sessions in the
 //! cache shared by the instances of the plugin; in a zellij session without
-//! it, the panes of Claude Code are found by their title.
+//! it, the panes of Claude Code are found by their title. It also writes
+//! there the projects directory of Claude Code (from the hook), where the
+//! list reads the transcripts of the previous conversations.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs;
+use std::fs::{self, File};
+use std::io::{Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::{
-    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, status_from_title, topic_from_title,
-    truncate,
+    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
+    status_from_title, topic_from_title, truncate,
 };
 use serde_json::Value;
 use zellij_tile::prelude::*;
@@ -30,24 +35,57 @@ const LIST_HEADER: usize = 2;
 const SCAN_INTERVAL: f64 = 2.0;
 /// The sessions of each zellij session (<name>.json), shared by the instances
 const SESSIONS_DIR: &str = "/cache/sessions";
+/// The projects directory of Claude Code, shared by the instances
+const PROJECTS_FILE: &str = "/cache/projects";
+/// Transcripts read, the latest ones
+const HISTORY_LENGTH: usize = 100;
+/// End of a transcript read for its title and directory (the start too for
+/// the directory, if not found)
+const TRANSCRIPT_TAIL: u64 = 256 * 1024;
+const TRANSCRIPT_HEAD: u64 = 64 * 1024;
+
+/// A previous conversation of Claude Code, from its transcript
+#[derive(Default)]
+struct Past {
+    id: String,
+    cwd: String,
+    /// Set with /rename, else by Claude, else the last prompt
+    title: String,
+    /// Unix time of the last change
+    modified: u64,
+}
+
+/// An entry of the list
+enum Item<'a> {
+    Running(&'a Session),
+    Past(&'a Past),
+}
 
 #[derive(Default)]
 struct State {
     list: bool,
     permitted: bool,
-    /// Background: the name of its zellij session
+    /// Background: the name of its zellij session, the projects directory of
+    /// Claude Code
     zellij_session: String,
+    projects: String,
     tabs: Vec<TabInfo>,
     panes: PaneManifest,
     /// Background: the sessions by id, the last name requested by tab
     sessions: BTreeMap<String, Session>,
     tab_names: HashMap<usize, String>,
     /// List: the sessions of its zellij session (received), the zellij
-    /// sessions, the sessions shown and the selected one
+    /// sessions, the sessions shown, the previous conversations, the search
+    /// and the selected entry
     current: Vec<Session>,
     zellij_sessions: Vec<SessionInfo>,
     shown: Vec<Session>,
+    past: Vec<Past>,
+    search: Option<String>,
     selected: usize,
+    /// List: the first line shown, the entry of each line shown
+    offset: usize,
+    lines: Vec<Option<usize>>,
 }
 
 register_plugin!(State);
@@ -61,11 +99,20 @@ impl ZellijPlugin for State {
             PermissionType::ChangeApplicationState,
             PermissionType::ReadCliPipes,
             PermissionType::MessageAndLaunchOtherPlugins,
+            // The list: the transcripts, claude --resume
+            PermissionType::FullHdAccess,
+            PermissionType::RunCommands,
         ]);
 
         let mut events = vec![EventType::PermissionRequestResult, EventType::TabUpdate, EventType::PaneUpdate];
         if self.list {
-            events.extend([EventType::Key, EventType::Mouse, EventType::SessionUpdate, EventType::Timer]);
+            events.extend([
+                EventType::Key,
+                EventType::Mouse,
+                EventType::SessionUpdate,
+                EventType::Timer,
+                EventType::HostFolderChanged,
+            ]);
         } else {
             events.push(EventType::SessionUpdate);
             set_selectable(false);
@@ -88,6 +135,9 @@ impl ZellijPlugin for State {
                     }
                     pipe_message_to_plugin(MessageToPlugin::new(SYNC_PIPE));
                     self.scan();
+                    if let Ok(projects) = fs::read_to_string(PROJECTS_FILE) {
+                        change_host_folder(PathBuf::from(projects.trim()));
+                    }
                 } else {
                     self.broadcast();
                 }
@@ -124,15 +174,22 @@ impl ZellijPlugin for State {
                 self.scan();
                 true
             },
+            Event::HostFolderChanged(_) if self.list => {
+                self.history();
+                self.clamp();
+                true
+            },
             Event::Key(key) if self.list => self.key(key),
             Event::Mouse(Mouse::LeftClick(line, _)) if self.list => {
-                let row = line.max(0) as usize;
-                if row >= LIST_HEADER && row - LIST_HEADER < self.shown.len() {
-                    self.selected = row - LIST_HEADER;
-                    self.jump();
+                let row = (line.max(0) as usize).checked_sub(LIST_HEADER);
+                if let Some(index) = row.and_then(|row| self.lines.get(row).copied().flatten()) {
+                    self.selected = index;
+                    self.open();
                 }
                 true
             },
+            Event::Mouse(Mouse::ScrollDown(_)) if self.list => self.key(KeyWithModifier::new(BareKey::Down)),
+            Event::Mouse(Mouse::ScrollUp(_)) if self.list => self.key(KeyWithModifier::new(BareKey::Up)),
             _ => false,
         }
     }
@@ -176,6 +233,13 @@ impl State {
         };
         let event = input["hook_event_name"].as_str().unwrap_or_default();
         let time = message.args.get("time").and_then(|t| t.parse().ok()).unwrap_or_default();
+
+        // For the previous conversations of the list
+        let projects = input["transcript_path"].as_str().and_then(|path| Path::new(path).parent()?.parent()?.to_str());
+        if let Some(projects) = projects.filter(|projects| *projects != self.projects) {
+            let _ = fs::write(PROJECTS_FILE, projects);
+            self.projects = projects.to_string();
+        }
 
         if event == "SessionEnd" {
             if self.sessions.remove(id).is_some() {
@@ -328,7 +392,7 @@ impl State {
     fn rebuild(&mut self) {
         if self.zellij_sessions.is_empty() {
             self.shown = self.current.clone();
-            self.selected = self.selected.min(self.shown.len().saturating_sub(1));
+            self.clamp();
             return;
         }
 
@@ -395,58 +459,152 @@ impl State {
         }
 
         self.shown = shown;
-        self.selected = self.selected.min(self.shown.len().saturating_sub(1));
+        self.clamp();
+    }
+
+    /// The previous conversations: the latest transcripts in the projects
+    /// directory of Claude Code (/host)
+    fn history(&mut self) {
+        let mut files = vec![];
+        for project in fs::read_dir("/host").into_iter().flatten().flatten() {
+            for file in fs::read_dir(project.path()).into_iter().flatten().flatten() {
+                let path = file.path();
+                if path.extension().is_none_or(|extension| extension != "jsonl") {
+                    continue;
+                }
+                let modified = file.metadata().and_then(|metadata| metadata.modified()).ok();
+                let modified = modified.and_then(|time| time.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs());
+                files.push((modified.unwrap_or_default(), path));
+            }
+        }
+        files.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+        self.past =
+            files.into_iter().take(HISTORY_LENGTH).filter_map(|(modified, path)| transcript(&path, modified)).collect();
+    }
+
+    /// The entries matching the search: the sessions, then the previous
+    /// conversations not running
+    fn items(&self) -> Vec<Item<'_>> {
+        let search = self.search.as_deref().unwrap_or_default();
+        let running = self.shown.iter().filter(|s| search_match(search, &format!("{} {}", s.project(), s.title())));
+        let past = self.past.iter().filter(|past| {
+            !self.shown.iter().any(|s| s.id == past.id)
+                && search_match(search, &format!("{} {}", project(&past.cwd), past.title))
+        });
+        running.map(Item::Running).chain(past.map(Item::Past)).collect()
+    }
+
+    fn clamp(&mut self) {
+        self.selected = self.selected.min(self.items().len().saturating_sub(1));
     }
 
     fn key(&mut self, key: KeyWithModifier) -> bool {
+        let count = self.items().len();
         match key.bare_key {
-            BareKey::Down | BareKey::Char('j') if !self.shown.is_empty() => {
-                self.selected = (self.selected + 1) % self.shown.len();
+            BareKey::Enter => self.open(),
+            BareKey::Esc if self.search.is_some() => {
+                self.search = None;
+                self.selected = 0;
             },
-            BareKey::Up | BareKey::Char('k') if !self.shown.is_empty() => {
-                self.selected = (self.selected + self.shown.len() - 1) % self.shown.len();
+            BareKey::Backspace if self.search.is_some() => {
+                if let Some(search) = &mut self.search {
+                    search.pop();
+                }
+                self.selected = 0;
             },
+            BareKey::Char(c) if self.search.is_some() && key.key_modifiers.is_empty() => {
+                if let Some(search) = &mut self.search {
+                    search.push(c);
+                }
+                self.selected = 0;
+            },
+            BareKey::Char('/') => self.search = Some(String::new()),
+            BareKey::Down | BareKey::Char('j') if count > 0 => self.selected = (self.selected + 1) % count,
+            BareKey::Up | BareKey::Char('k') if count > 0 => self.selected = (self.selected + count - 1) % count,
             BareKey::Char(digit @ '1'..='9') => {
                 let index = digit as usize - '1' as usize;
-                if index < self.shown.len() {
+                if index < count {
                     self.selected = index;
-                    self.jump();
+                    self.open();
                 }
             },
-            BareKey::Enter => self.jump(),
             BareKey::Esc | BareKey::Char('q') => close_self(),
             _ => return false,
         }
         true
     }
 
-    fn jump(&self) {
-        let Some(session) = self.shown.get(self.selected) else { return };
-        let current = self.zellij_sessions.iter().find(|info| info.is_current_session);
-        if session.zellij_session.is_empty() || current.is_none_or(|info| info.name == session.zellij_session) {
-            focus_pane_with_id(PaneId::Terminal(session.pane_id), false, false);
-        } else {
-            switch_session_with_focus(&session.zellij_session, session.tab_position, Some((session.pane_id, false)));
+    /// Jumps to the selected session, or resumes the selected conversation
+    /// in a new tab
+    fn open(&self) {
+        match self.items().get(self.selected) {
+            Some(Item::Running(session)) => {
+                let current = self.zellij_sessions.iter().find(|info| info.is_current_session);
+                if session.zellij_session.is_empty() || current.is_none_or(|info| info.name == session.zellij_session) {
+                    focus_pane_with_id(PaneId::Terminal(session.pane_id), false, false);
+                } else {
+                    switch_session_with_focus(
+                        &session.zellij_session,
+                        session.tab_position,
+                        Some((session.pane_id, false)),
+                    );
+                }
+            },
+            Some(Item::Past(past)) => {
+                let command = CommandToRun {
+                    path: "claude".into(),
+                    args: vec!["--resume".to_string(), past.id.clone()],
+                    cwd: (!past.cwd.is_empty()).then(|| PathBuf::from(&past.cwd)),
+                };
+                open_command_pane_in_new_tab(command, BTreeMap::new());
+            },
+            None => return,
         }
         close_self();
     }
 
-    fn render_list(&self, rows: usize, cols: usize) {
+    fn render_list(&mut self, rows: usize, cols: usize) {
         let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or_default();
+        let items = self.items();
+        let running = items.iter().filter(|item| matches!(item, Item::Running(_))).count();
 
-        println!(
-            "\u{1b}[1m{} session{}\u{1b}[0m \u{1b}[2m· ↑↓ or 1-9 to jump · Esc\u{1b}[0m",
-            self.shown.len(),
-            if self.shown.len() == 1 { "" } else { "s" }
-        );
-        println!();
+        let header = match &self.search {
+            Some(search) => format!("\u{1b}[1m/\u{1b}[0m {search}\u{1b}[7m \u{1b}[0m \u{1b}[2m· Enter · Esc\u{1b}[0m"),
+            None => format!(
+                "\u{1b}[1m{running} session{}\u{1b}[0m \u{1b}[2m· ↑↓ or 1-9 to jump · / search · Esc\u{1b}[0m",
+                if running == 1 { "" } else { "s" }
+            ),
+        };
 
-        if self.shown.is_empty() {
-            println!("\u{1b}[2mNo Claude Code session\u{1b}[0m");
-            return;
+        // The entry of each line; None: the title of the previous conversations
+        let mut lines = vec![];
+        for (index, item) in items.iter().enumerate() {
+            if matches!(item, Item::Past(_)) && index == running {
+                lines.push(None);
+            }
+            lines.push(Some(index));
         }
 
-        let project_width = self.shown.iter().map(|s| s.project().chars().count()).max().unwrap_or(0).min(20);
+        // The selected entry on screen
+        let height = rows.saturating_sub(LIST_HEADER);
+        let position = lines.iter().position(|line| *line == Some(self.selected)).unwrap_or(0);
+        let mut offset = self.offset.min(lines.len().saturating_sub(height));
+        if position < offset {
+            offset = if position > 0 && lines[position - 1].is_none() { position - 1 } else { position };
+        } else if position >= offset + height {
+            offset = position + 1 - height;
+        }
+
+        let project_width = items
+            .iter()
+            .map(|item| match item {
+                Item::Running(session) => session.project(),
+                Item::Past(past) => project(&past.cwd),
+            })
+            .map(|project| project.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(20);
         // The zellij session, when there are several
         let several = self.shown.iter().any(|s| s.zellij_session != self.shown[0].zellij_session);
         let zellij_width = if several {
@@ -455,37 +613,107 @@ impl State {
             0
         };
 
-        for (index, session) in self.shown.iter().enumerate().take(rows.saturating_sub(LIST_HEADER)) {
-            let color = match session.status {
-                Status::Idle => "32",
-                Status::Working => "34",
-                Status::Waiting => "33",
+        let mut output = vec![];
+        for line in lines.iter().skip(offset).take(height) {
+            let Some(index) = *line else {
+                output.push("\u{1b}[2m  Previous conversations\u{1b}[0m".to_string());
+                continue;
             };
-            let detail = match session.status {
-                Status::Working => session.tool.clone().unwrap_or_default(),
-                Status::Waiting => session.message.clone().or(session.tool.clone()).unwrap_or_default(),
-                Status::Idle => String::new(),
+            let (icon, color, zellij, project, title, detail, since) = match items[index] {
+                Item::Running(session) => {
+                    let color = match session.status {
+                        Status::Idle => "32",
+                        Status::Working => "34",
+                        Status::Waiting => "33",
+                    };
+                    let detail = match session.status {
+                        Status::Working => session.tool.clone().unwrap_or_default(),
+                        Status::Waiting => session.message.clone().or(session.tool.clone()).unwrap_or_default(),
+                        Status::Idle => String::new(),
+                    };
+                    let zellij = session.zellij_session.as_str();
+                    (session.status.icon(), color, zellij, session.project(), session.title(), detail, session.since)
+                },
+                Item::Past(past) => {
+                    ("↺", "2", "", project(&past.cwd), past.title.as_str(), String::new(), past.modified)
+                },
             };
-            let age = if session.since > 0 && now >= session.since { age(now - session.since) } else { String::new() };
+            let age = if since > 0 && now >= since { age(now - since) } else { String::new() };
+            let number = if index < 9 { (index + 1).to_string() } else { " ".to_string() };
 
-            // The topic takes the room left by the other columns
-            let zellij = if several {
-                format!("{:<zellij_width$}  ", truncate(&session.zellij_session, zellij_width))
-            } else {
-                String::new()
-            };
-            let left =
-                format!("{} {zellij}{:<project_width$}  ", index + 1, truncate(session.project(), project_width));
-            let right = format!("  {}  {:>3}", truncate(&detail, 24), age);
+            // The title takes the room left by the other columns
+            let zellij =
+                if several { format!("{:<zellij_width$}  ", truncate(zellij, zellij_width)) } else { String::new() };
+            let left = format!("{number} {zellij}{:<project_width$}  ", truncate(project, project_width));
+            let right = format!("  {:<24}  {:>3}", truncate(&detail, 24), age);
             let room = cols.saturating_sub(2 + left.chars().count() + right.chars().count());
-            let topic = truncate(session.title(), room);
-            let space = room - topic.chars().count();
-            let line = truncate(&format!("{left}{topic}{:space$}{right}", ""), cols.saturating_sub(2));
+            let title = truncate(title, room);
+            let space = room - title.chars().count();
+            let text = truncate(&format!("{left}{title}{:space$}{right}", ""), cols.saturating_sub(2));
 
             let selected = if index == self.selected { "\u{1b}[7m" } else { "" };
-            println!("{selected}\u{1b}[{color}m{}\u{1b}[39m {line}\u{1b}[0m", session.status.icon());
+            output.push(format!("{selected}\u{1b}[{color}m{icon}\u{1b}[39m {text}\u{1b}[0m"));
+        }
+        let empty = items.is_empty();
+        drop(items);
+
+        self.offset = offset;
+        self.lines = lines.into_iter().skip(offset).take(height).collect();
+
+        if empty {
+            let found = if self.search.is_some() { " found" } else { "" };
+            output.push(format!("\u{1b}[2mNo Claude Code session{found}\u{1b}[0m"));
+        }
+        // Without a newline after the last line: the pane would scroll
+        print!("{header}\n\n{}", output.join("\n"));
+    }
+}
+
+/// A previous conversation from the end of its transcript (the start too for
+/// the directory, if not found); None without a title
+fn transcript(path: &Path, modified: u64) -> Option<Past> {
+    let mut file = File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let mut past = Past { id: path.file_stem()?.to_str()?.to_string(), modified, ..Default::default() };
+    let (mut custom, mut ai, mut prompt) = (None, None, None);
+
+    let tail = read(&mut file, size.saturating_sub(TRANSCRIPT_TAIL), TRANSCRIPT_TAIL)?;
+    // The latest first; the first line may be cut
+    for line in tail.lines().rev() {
+        let wanted = |kind: &str| line.starts_with(&format!("{{\"type\":\"{kind}\""));
+        if custom.is_none() && wanted("custom-title") {
+            custom = field(line, "customTitle");
+        } else if ai.is_none() && wanted("ai-title") {
+            ai = field(line, "aiTitle");
+        } else if prompt.is_none() && wanted("last-prompt") {
+            prompt = field(line, "lastPrompt");
+        } else if past.cwd.is_empty() && line.contains("\"cwd\":\"") {
+            past.cwd = field(line, "cwd").unwrap_or_default();
+        }
+        if custom.is_some() && !past.cwd.is_empty() {
+            break;
         }
     }
+    if past.cwd.is_empty() && size > TRANSCRIPT_TAIL {
+        let head = read(&mut file, 0, TRANSCRIPT_HEAD)?;
+        past.cwd = head.lines().filter(|line| line.contains("\"cwd\":\"")).find_map(|line| field(line, "cwd"))?;
+    }
+
+    past.title = custom.or(ai).or(prompt)?.split_whitespace().collect::<Vec<_>>().join(" ");
+    Some(past)
+}
+
+fn read(file: &mut File, start: u64, length: u64) -> Option<String> {
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut bytes = vec![];
+    file.take(length).read_to_end(&mut bytes).ok()?;
+    Some(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+/// A string field of a JSON line
+fn field(line: &str, name: &str) -> Option<String> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    value[name].as_str().filter(|text| !text.is_empty()).map(str::to_string)
 }
 
 /// A notification asking for a permission or an answer; not the others
