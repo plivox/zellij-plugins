@@ -45,20 +45,33 @@ const RUNTIMES_PIPE: &str = "bar::runtimes";
 /// Delay to confirm the close of a tab
 const CONFIRM_CLOSE: Duration = Duration::from_secs(3);
 
-// Nord, the colors of the plivox theme
-type Rgb = (u8, u8, u8);
-const POLAR0: Rgb = (0x2E, 0x34, 0x40);
-const POLAR1: Rgb = (0x3B, 0x42, 0x52);
-const POLAR3: Rgb = (0x4C, 0x56, 0x6A);
-const COMMENT: Rgb = (0x61, 0x6E, 0x88);
-const SNOW: Rgb = (0xD8, 0xDE, 0xE9);
-const FROST: Rgb = (0x88, 0xC0, 0xD0);
-const BLUE: Rgb = (0x81, 0xA1, 0xC1);
-const RED: Rgb = (0xBF, 0x61, 0x6A);
-const ORANGE: Rgb = (0xD0, 0x87, 0x70);
-const YELLOW: Rgb = (0xEB, 0xCB, 0x8B);
-const GREEN: Rgb = (0xA3, 0xBE, 0x8C);
-const PURPLE: Rgb = (0xB4, 0x8E, 0xAD);
+#[derive(Clone, Copy)]
+enum Color {
+    Rgb(u8, u8, u8),
+    /// Of the palette of the terminal (0-15)
+    Ansi(u8),
+}
+use Color::{Ansi, Rgb};
+
+// Nord, the colors of the plivox theme (the tabs)
+const POLAR0: Color = Rgb(0x2E, 0x34, 0x40);
+const POLAR1: Color = Rgb(0x3B, 0x42, 0x52);
+const POLAR3: Color = Rgb(0x4C, 0x56, 0x6A);
+const COMMENT: Color = Rgb(0x61, 0x6E, 0x88);
+const SNOW: Color = Rgb(0xD8, 0xDE, 0xE9);
+const FROST: Color = Rgb(0x88, 0xC0, 0xD0);
+const RED: Color = Rgb(0xBF, 0x61, 0x6A);
+const ORANGE: Color = Rgb(0xD0, 0x87, 0x70);
+const YELLOW: Color = Rgb(0xEB, 0xCB, 0x8B);
+const GREEN: Color = Rgb(0xA3, 0xBE, 0x8C);
+// The palette of the terminal, the colors of the prompt of zsh (the status)
+const TERM_RED: Color = Ansi(1);
+const TERM_GREEN: Color = Ansi(2);
+const TERM_YELLOW: Color = Ansi(3);
+const TERM_BLUE: Color = Ansi(4);
+const TERM_MAGENTA: Color = Ansi(5);
+const TERM_CYAN: Color = Ansi(6);
+const TERM_GRAY: Color = Ansi(8);
 
 #[derive(Default, PartialEq)]
 enum View {
@@ -287,11 +300,13 @@ impl ZellijPlugin for State {
         let mut left = Line::default();
         let mut buttons = vec![];
         if status {
-            left.push(&format!(" {} ", mode_name(self.mode)), Some(POLAR0), Some(mode_color(self.mode)), true);
+            // Like the prompt of zsh: the colors of the terminal, no
+            // background
+            left.push(&format!(" {} ", mode_name(self.mode)), Some(mode_term_color(self.mode)), None, true);
             let start = left.width;
             match &self.session_name {
                 Some(name) => left.push(&format!(" {name}▏"), Some(POLAR0), Some(YELLOW), true),
-                None => left.push(&format!(" {} ", self.session), Some(FROST), None, true),
+                None => left.push(&format!(" {} ", self.session), Some(TERM_YELLOW), None, false),
             }
             self.targets.push((start, left.width, Target::Session));
             left.push(" ", None, None, false);
@@ -300,8 +315,7 @@ impl ZellijPlugin for State {
         let mut right = Line::default();
         if status && self.git_url.is_some() {
             let start = right.width;
-            right.push(" ⎇ ", Some(FROST), Some(POLAR1), true);
-            right.push("Git ", Some(COMMENT), Some(POLAR1), false);
+            right.push("⎇ git", Some(TERM_BLUE), None, false);
             buttons.push((start, right.width, Target::Git));
             right.push("  ", None, None, false);
         }
@@ -311,10 +325,10 @@ impl ZellijPlugin for State {
             }
             self.runtimes_line(&mut right);
             if !self.hint.is_empty() {
-                right.push(&format!("{}  ", self.hint), Some(POLAR3), None, false);
+                right.push(&format!("{}  ", self.hint), Some(TERM_GRAY), None, false);
             }
             if let Some(time) = self.time() {
-                right.push(&format!("{time} "), Some(POLAR3), None, false);
+                right.push(&format!("{time} "), Some(TERM_GRAY), None, false);
             }
         }
 
@@ -349,15 +363,15 @@ impl State {
     fn claude_summary(&self, line: &mut Line) -> Option<(usize, usize)> {
         self.claude_url.as_ref()?;
         let start = line.width;
-        line.push(" ✳ ", Some(ORANGE), Some(POLAR1), true);
+        line.push("✳", Some(ORANGE), None, true);
         if self.sessions.is_empty() {
-            line.push("Claude ", Some(COMMENT), Some(POLAR1), false);
+            line.push(" claude", Some(TERM_BLUE), None, false);
         }
         for status in [Status::Waiting, Status::Working, Status::Idle] {
             let count = self.sessions.iter().filter(|s| s.status == status).count();
             if count > 0 {
-                let text = format!("{} {count} ", status.icon());
-                line.push(&text, Some(status_color(status)), Some(POLAR1), status == Status::Waiting);
+                let text = format!(" {} {count}", status.icon());
+                line.push(&text, Some(status_term_color(status)), None, status == Status::Waiting);
             }
         }
         let end = line.width;
@@ -382,9 +396,9 @@ impl State {
                 continue;
             }
             let (version, environment) = word.split_at(word.find('(').unwrap_or(word.len()));
-            line.push(version, Some(GREEN), None, false);
+            line.push(version, Some(TERM_GREEN), None, false);
             if !environment.is_empty() {
-                line.push(environment, Some(YELLOW), None, false);
+                line.push(environment, Some(TERM_YELLOW), None, false);
             }
         }
         line.push("  ", None, None, false);
@@ -622,12 +636,14 @@ struct Line {
 }
 
 impl Line {
-    fn push(&mut self, text: &str, fg: Option<Rgb>, bg: Option<Rgb>, bold: bool) {
-        if let Some((r, g, b)) = fg {
-            self.text.push_str(&format!("\u{1b}[38;2;{r};{g};{b}m"));
-        }
-        if let Some((r, g, b)) = bg {
-            self.text.push_str(&format!("\u{1b}[48;2;{r};{g};{b}m"));
+    fn push(&mut self, text: &str, fg: Option<Color>, bg: Option<Color>, bold: bool) {
+        for (color, base) in [(fg, 30), (bg, 40)] {
+            match color {
+                Some(Rgb(r, g, b)) => self.text.push_str(&format!("\u{1b}[{};2;{r};{g};{b}m", base + 8)),
+                Some(Ansi(n)) if n < 8 => self.text.push_str(&format!("\u{1b}[{}m", base + u16::from(n))),
+                Some(Ansi(n)) => self.text.push_str(&format!("\u{1b}[{}m", base + 52 + u16::from(n))),
+                None => {},
+            }
         }
         if bold {
             self.text.push_str("\u{1b}[1m");
@@ -673,19 +689,26 @@ fn mode_name(mode: InputMode) -> &'static str {
     }
 }
 
-fn mode_color(mode: InputMode) -> Rgb {
+fn mode_term_color(mode: InputMode) -> Color {
     match mode {
-        InputMode::Normal => BLUE,
-        InputMode::Locked => RED,
-        InputMode::Pane | InputMode::RenamePane => GREEN,
-        InputMode::Tab | InputMode::RenameTab => YELLOW,
-        InputMode::Resize | InputMode::Move | InputMode::Tmux => ORANGE,
-        InputMode::Scroll | InputMode::EnterSearch | InputMode::Search => PURPLE,
-        InputMode::Session | InputMode::Prompt => FROST,
+        InputMode::Normal => TERM_BLUE,
+        InputMode::Locked => TERM_RED,
+        InputMode::Pane | InputMode::RenamePane => TERM_GREEN,
+        InputMode::Tab | InputMode::RenameTab | InputMode::Resize | InputMode::Move | InputMode::Tmux => TERM_YELLOW,
+        InputMode::Scroll | InputMode::EnterSearch | InputMode::Search => TERM_MAGENTA,
+        InputMode::Session | InputMode::Prompt => TERM_CYAN,
     }
 }
 
-fn status_color(status: Status) -> Rgb {
+fn status_term_color(status: Status) -> Color {
+    match status {
+        Status::Idle => TERM_GREEN,
+        Status::Working => TERM_CYAN,
+        Status::Waiting => TERM_YELLOW,
+    }
+}
+
+fn status_color(status: Status) -> Color {
     match status {
         Status::Idle => GREEN,
         Status::Working => FROST,

@@ -99,6 +99,9 @@ layout {
 }
 ```
 
+The tabs are pills in the colors of the plivox theme (Nord), the rest takes
+the colors of the terminal, like a shell prompt.
+
 Split in two bars, the tabs on top and the rest at the bottom:
 `view "tabs"` and `view "status"` (the buttons and the time go to the
 second).
