@@ -10,6 +10,11 @@
 //! list, like their key bindings. A double click on the session renames it
 //! (Enter keeps the new name, Esc cancels).
 //!
+//! The runtimes of the focused pane (mise: node, python, ruby), sent by its
+//! shell: `zellij pipe --name bar::runtimes --args
+//! pane_id=$ZELLIJ_PANE_ID,time=$EPOCHREALTIME -- "🤖 25.9.0 🐍 3.14.4"`, on
+//! the right.
+//!
 //! The tabs of the panels (git, claude) show one in place of the other
 //! through the bar of their tab, which knows their URLs.
 //!
@@ -35,6 +40,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 /// To the bars of the other tabs (each tab has its own): the position of the
 /// clicked tab
 const CLICK_PIPE: &str = "bar::click";
+/// From the shells: the runtimes of their pane
+const RUNTIMES_PIPE: &str = "bar::runtimes";
 /// Delay to confirm the close of a tab
 const CONFIRM_CLOSE: Duration = Duration::from_secs(3);
 
@@ -78,6 +85,10 @@ struct State {
     sessions: Vec<Session>,
     /// The position of the tab of this bar
     tab: Option<usize>,
+    /// The runtimes of the terminal panes (and when they were sent), the last
+    /// focused one of the tab
+    runtimes: HashMap<u32, (f64, String)>,
+    terminal: Option<u32>,
 
     /// Clickable ranges of the last render: (first column, end column, target)
     targets: Vec<(usize, usize, Target)>,
@@ -129,6 +140,8 @@ impl ZellijPlugin for State {
             PermissionType::MessageAndLaunchOtherPlugins,
             // The buttons: zellij action launch-or-focus-plugin
             PermissionType::RunCommands,
+            // The runtimes sent by the shells
+            PermissionType::ReadCliPipes,
         ]);
         subscribe(&[
             EventType::PermissionRequestResult,
@@ -177,7 +190,19 @@ impl ZellijPlugin for State {
                     .iter()
                     .find(|(_, panes)| panes.iter().any(|p| p.is_plugin && p.id == id))
                     .map(|(tab, _)| *tab);
-                false
+                let terminals = || manifest.panes.values().flatten().filter(|p| !p.is_plugin);
+                self.runtimes.retain(|id, _| terminals().any(|p| p.id == *id));
+                // The focused one of its tab, floating first (when shown)
+                let shown = self.tabs.iter().any(|t| Some(t.position) == self.tab && t.are_floating_panes_visible);
+                let focused = self.tab.and_then(|tab| manifest.panes.get(&tab)).and_then(|panes| {
+                    let focused = |floating: bool| {
+                        panes.iter().find(|p| !p.is_plugin && p.is_focused && p.is_floating == floating).map(|p| p.id)
+                    };
+                    shown.then(|| focused(true)).flatten().or_else(|| focused(false))
+                });
+                let changed = focused.is_some() && focused != self.terminal;
+                self.terminal = focused.or(self.terminal);
+                changed
             },
             Event::Key(key) => self.session_key(key),
             Event::Mouse(Mouse::LeftClick(_, column)) => self.click(column),
@@ -224,6 +249,27 @@ impl ZellijPlugin for State {
                 }
                 false
             },
+            RUNTIMES_PIPE => {
+                // The zellij pipe of the shell waits for it
+                if let PipeSource::Cli(pipe) = &message.source {
+                    unblock_cli_pipe_input(pipe);
+                }
+                // Its end of input comes without payload
+                let (Some(id), Some(payload)) =
+                    (message.args.get("pane_id").and_then(|id| id.parse().ok()), message.payload)
+                else {
+                    return false;
+                };
+                // The shell sends them in the background: the latest kept
+                let time = message.args.get("time").and_then(|t| t.parse().ok()).unwrap_or_default();
+                if self.runtimes.get(&id).is_some_and(|(last, _)| *last > time) {
+                    return false;
+                }
+                let runtimes = payload.trim().to_string();
+                let changed = self.runtimes.get(&id).is_none_or(|(_, last)| *last != runtimes);
+                self.runtimes.insert(id, (time, runtimes));
+                changed && self.terminal == Some(id)
+            },
             CLICK_PIPE => {
                 if let Some(position) = message.payload.as_deref().and_then(|p| p.parse().ok()) {
                     self.last_click = Some((position, SystemTime::now()));
@@ -263,6 +309,7 @@ impl ZellijPlugin for State {
             if let Some((start, end)) = self.claude_summary(&mut right) {
                 buttons.push((start, end, Target::Claude));
             }
+            self.runtimes_line(&mut right);
             if !self.hint.is_empty() {
                 right.push(&format!("{}  ", self.hint), Some(POLAR3), None, false);
             }
@@ -316,6 +363,31 @@ impl State {
         let end = line.width;
         line.push("  ", None, None, false);
         Some((start, end))
+    }
+
+    /// The runtimes of the focused pane: the versions in green, a virtual
+    /// environment in yellow
+    fn runtimes_line(&self, line: &mut Line) {
+        let Some(runtimes) =
+            self.terminal.and_then(|id| self.runtimes.get(&id)).map(|(_, r)| r).filter(|r| !r.is_empty())
+        else {
+            return;
+        };
+        for (i, word) in runtimes.split_whitespace().enumerate() {
+            if i > 0 {
+                line.push(" ", None, None, false);
+            }
+            if !word.starts_with(|c: char| c.is_ascii_alphanumeric()) {
+                line.push(word, None, None, false);
+                continue;
+            }
+            let (version, environment) = word.split_at(word.find('(').unwrap_or(word.len()));
+            line.push(version, Some(GREEN), None, false);
+            if !environment.is_empty() {
+                line.push(environment, Some(YELLOW), None, false);
+            }
+        }
+        line.push("  ", None, None, false);
     }
 
     /// The tabs as pills, in `room` columns starting at `offset`: the names
@@ -562,12 +634,21 @@ impl Line {
         }
         self.text.push_str(text);
         self.text.push_str("\u{1b}[0m");
-        self.width += text.chars().count();
+        self.width += text.chars().map(char_width).sum::<usize>();
     }
 
     fn append(&mut self, other: Line) {
         self.text.push_str(&other.text);
         self.width += other.width;
+    }
+}
+
+/// Columns of a character: the emoji take two, the zero-width ones none
+fn char_width(c: char) -> usize {
+    match c {
+        '\u{200b}'..='\u{200d}' | '\u{fe00}'..='\u{fe0f}' => 0,
+        '\u{1f300}'..='\u{1faff}' => 2,
+        _ => 1,
     }
 }
 

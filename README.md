@@ -11,7 +11,8 @@
   click renames it, its `✕` closes the active tab (a second click confirms);
   the Git button opens the git panel, the Claude Code button (`✳` and the
   sessions by status) their list; a double click on the session renames it.
-  It can be split in two: the tabs on top, the rest at the bottom.
+  It shows the runtimes of the focused pane, sent by its shell. It can be
+  split in two: the tabs on top, the rest at the bottom.
 - **git**: the git changes of the focused pane, in a floating panel: staged,
   not staged, untracked, in conflict, with the lines added and removed. Enter
   shows a diff, `s` stages or unstages a file, `g` opens lazygit, `p` docks
@@ -111,8 +112,18 @@ The buttons open the panels like their key bindings
 new name, Esc cancels). The tabs of the panels go through the bar, which knows
 their URLs: `zellij action launch-or-focus-plugin --in-place`.
 
+The runtimes of the focused pane (e.g. mise: `🤖 25.9.0 🐍 3.14.4(venv)`, the
+versions in green, a virtual environment in yellow), sent by its shell when
+they change, the time to keep the latest:
+
+```sh
+zellij pipe --name bar::runtimes --args "pane_id=$ZELLIJ_PANE_ID,time=$EPOCHREALTIME" \
+  -- "🤖 25.9.0 🐍 3.14.4" < /dev/null &> /dev/null &!
+```
+
 Permissions: `ReadApplicationState`, `ChangeApplicationState`,
-`MessageAndLaunchOtherPlugins`, `RunCommands` (the buttons).
+`MessageAndLaunchOtherPlugins`, `RunCommands` (the buttons), `ReadCliPipes`
+(the runtimes).
 
 ## git
 

@@ -1,6 +1,6 @@
 [package]
 name = "bar"
-description = "Status bar: mode, session, tabs (double click to rename), Claude Code sessions and time"
+description = "Status bar: mode, session, tabs (double click to rename), Claude Code sessions, runtimes and time"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
