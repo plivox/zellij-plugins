@@ -37,7 +37,8 @@ load_plugins {
 
 The list, from a key binding: the sessions, then the previous conversations
 (the latest transcripts of Claude Code), resumed in a new tab
-(`claude --resume`, in their directory). `↑↓`/`jk` and Enter, a digit or a
+(`claude --resume`, in the directory it looks in: the one of their projects
+folder, even if the conversation went to another one, a worktree). `↑↓`/`jk` and Enter, a digit or a
 click opens one, `/` searches (each word, in the project and the title), `p`
 docks the list on the right (it then stays open), Tab shows the git panel in
 its place, Esc closes. With

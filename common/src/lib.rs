@@ -90,6 +90,13 @@ pub fn project(cwd: &str) -> &str {
     cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd)
 }
 
+/// The projects folder of Claude Code for a working directory (where
+/// `claude --resume` looks): each character other than a letter, a digit or
+/// a dash replaced by a dash
+pub fn project_folder(cwd: &str) -> String {
+    cwd.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect()
+}
+
 /// Whether each word of the search is in the text, ignoring the case
 pub fn search_match(search: &str, text: &str) -> bool {
     let text = text.to_lowercase();
@@ -133,6 +140,14 @@ pub fn is_renamable(tab_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder() {
+        assert_eq!(
+            project_folder("/Users/Plivox/Projects/@Github/@Plivox/Platform/.claude/worktrees/files-phase-2"),
+            "-Users-Plivox-Projects--Github--Plivox-Platform--claude-worktrees-files-phase-2"
+        );
+    }
 
     #[test]
     fn topic() {

@@ -24,8 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::panel::{self, Panel};
 use common::{
-    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, search_match,
-    status_from_title, topic_from_title, truncate,
+    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, project_folder,
+    search_match, status_from_title, topic_from_title, truncate,
 };
 use serde_json::Value;
 use zellij_tile::prelude::*;
@@ -711,12 +711,29 @@ impl State {
 }
 
 /// A previous conversation from the end of its transcript (the start too for
-/// the directory, if not found); None without a title
+/// the directory, if not found); None without a title.
+///
+/// Its directory is the one `claude --resume` looks in: the one of its
+/// projects folder (the conversation may have gone to another directory, a
+/// worktree), else the latest one.
 fn transcript(path: &Path, modified: u64) -> Option<Past> {
     let mut file = File::open(path).ok()?;
     let size = file.metadata().ok()?.len();
     let mut past = Past { id: path.file_stem()?.to_str()?.to_string(), modified, ..Default::default() };
+    let folder = path.parent()?.file_name()?.to_str()?;
     let (mut custom, mut ai, mut prompt) = (None, None, None);
+    let mut found = false;
+    // Whether the directory of this line is the one of the folder
+    let directory = |line: &str, past: &mut Past| {
+        let Some(cwd) = field(line, "cwd").filter(|cwd| *cwd != past.cwd) else {
+            return false;
+        };
+        let found = project_folder(&cwd) == folder;
+        if found || past.cwd.is_empty() {
+            past.cwd = cwd;
+        }
+        found
+    };
 
     let tail = read(&mut file, size.saturating_sub(TRANSCRIPT_TAIL), TRANSCRIPT_TAIL)?;
     // The latest first; the first line may be cut
@@ -728,16 +745,20 @@ fn transcript(path: &Path, modified: u64) -> Option<Past> {
             ai = field(line, "aiTitle");
         } else if prompt.is_none() && wanted("last-prompt") {
             prompt = field(line, "lastPrompt");
-        } else if past.cwd.is_empty() && line.contains("\"cwd\":\"") {
-            past.cwd = field(line, "cwd").unwrap_or_default();
+        } else if !found && line.contains("\"cwd\":\"") {
+            found = directory(line, &mut past);
         }
-        if custom.is_some() && !past.cwd.is_empty() {
+        if custom.is_some() && found {
             break;
         }
     }
-    if past.cwd.is_empty() && size > TRANSCRIPT_TAIL {
+    if !found && size > TRANSCRIPT_TAIL {
         let head = read(&mut file, 0, TRANSCRIPT_HEAD)?;
-        past.cwd = head.lines().filter(|line| line.contains("\"cwd\":\"")).find_map(|line| field(line, "cwd"))?;
+        // The earliest first
+        head.lines().filter(|line| line.contains("\"cwd\":\"")).any(|line| directory(line, &mut past));
+    }
+    if past.cwd.is_empty() {
+        return None;
     }
 
     past.title = custom.or(ai).or(prompt)?.split_whitespace().collect::<Vec<_>>().join(" ");
