@@ -72,6 +72,10 @@ pub struct Session {
     /// zellij session of the pane
     #[serde(default)]
     pub zellij_session: String,
+    /// The directory to resume it in: the one of its projects folder
+    /// (`claude --resume` looks there), else the first one
+    #[serde(default)]
+    pub directory: String,
 }
 
 impl Session {
@@ -88,6 +92,28 @@ impl Session {
 /// Last component of a working directory
 pub fn project(cwd: &str) -> &str {
     cwd.trim_end_matches('/').rsplit('/').next().unwrap_or(cwd)
+}
+
+/// The project of a working directory, a worktree of Claude Code after it
+/// (`Platform ⎇ fix-login`)
+pub fn project_label(cwd: &str) -> String {
+    match cwd.split_once("/.claude/worktrees/") {
+        Some((root, rest)) => format!("{} ⎇ {}", project(root), rest.split('/').next().unwrap_or(rest)),
+        None => project(cwd).to_string(),
+    }
+}
+
+/// A directory with `~` for a home (/home/<user>, /Users/<user>)
+pub fn short_directory(cwd: &str) -> String {
+    for home in ["/home/", "/Users/"] {
+        if let Some(rest) = cwd.strip_prefix(home) {
+            return match rest.find('/') {
+                Some(slash) => format!("~{}", &rest[slash..]),
+                None => "~".to_string(),
+            };
+        }
+    }
+    cwd.to_string()
 }
 
 /// The projects folder of Claude Code for a working directory (where
@@ -140,6 +166,18 @@ pub fn is_renamable(tab_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn directories() {
+        assert_eq!(
+            project_label("/home/plivox/Projects/Platform/.claude/worktrees/fix-login/modules"),
+            "Platform ⎇ fix-login"
+        );
+        assert_eq!(project_label("/home/plivox/Projects/Platform"), "Platform");
+        assert_eq!(short_directory("/home/plivox/Projects/Platform"), "~/Projects/Platform");
+        assert_eq!(short_directory("/Users/Plivox"), "~");
+        assert_eq!(short_directory("/tmp"), "/tmp");
+    }
 
     #[test]
     fn folder() {

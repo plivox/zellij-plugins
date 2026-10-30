@@ -24,8 +24,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use common::panel::{self, Panel};
 use common::{
-    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project, project_folder,
-    search_match, status_from_title, topic_from_title, truncate,
+    EVENT_PIPE, NAME_MARKER, STATE_PIPE, SYNC_PIPE, Session, Status, is_renamable, project_folder, project_label,
+    search_match, short_directory, status_from_title, topic_from_title, truncate,
 };
 use serde_json::Value;
 use zellij_tile::prelude::*;
@@ -305,6 +305,12 @@ impl State {
         session.pane_id = pane_id;
         if let Some(cwd) = input["cwd"].as_str() {
             session.cwd = cwd.to_string();
+            // The one claude --resume looks in: of its projects folder
+            let folder =
+                input["transcript_path"].as_str().and_then(|path| Path::new(path).parent()?.file_name()?.to_str());
+            if session.directory.is_empty() || folder.is_some_and(|folder| project_folder(cwd) == folder) {
+                session.directory = cwd.to_string();
+            }
         }
         if session.status != status {
             session.since = time;
@@ -517,10 +523,13 @@ impl State {
     /// conversations not running
     fn items(&self) -> Vec<Item<'_>> {
         let search = self.search.as_deref().unwrap_or_default();
-        let running = self.shown.iter().filter(|s| search_match(search, &format!("{} {}", s.project(), s.title())));
+        // The project and the worktree, the title
+        let running = self.shown.iter().filter(|s| {
+            search_match(search, &format!("{} {} {}", project_label(&s.directory), s.project(), s.title()))
+        });
         let past = self.past.iter().filter(|past| {
             !self.shown.iter().any(|s| s.id == past.id)
-                && search_match(search, &format!("{} {}", project(&past.cwd), past.title))
+                && search_match(search, &format!("{} {}", project_label(&past.cwd), past.title))
         });
         running.map(Item::Running).chain(past.map(Item::Past)).collect()
     }
@@ -625,7 +634,8 @@ impl State {
         }
 
         // The selected entry on screen
-        let height = rows.saturating_sub(LIST_HEADER);
+        // Under the list: the directory of the selected entry
+        let height = rows.saturating_sub(LIST_HEADER + 2);
         let position = lines.iter().position(|line| *line == Some(self.selected)).unwrap_or(0);
         let mut offset = self.offset.min(lines.len().saturating_sub(height));
         if position < offset {
@@ -634,16 +644,18 @@ impl State {
             offset = position + 1 - height;
         }
 
+        // The directory to resume in: of its projects folder
+        let directory = |item: &Item| match item {
+            Item::Running(session) if !session.directory.is_empty() => session.directory.clone(),
+            Item::Running(session) => session.cwd.clone(),
+            Item::Past(past) => past.cwd.clone(),
+        };
         let project_width = items
             .iter()
-            .map(|item| match item {
-                Item::Running(session) => session.project(),
-                Item::Past(past) => project(&past.cwd),
-            })
-            .map(|project| project.chars().count())
+            .map(|item| project_label(&directory(item)).chars().count())
             .max()
             .unwrap_or(0)
-            .min(20);
+            .min(28.min(cols / 3));
         // The zellij session, when there are several
         let several = self.shown.iter().any(|s| s.zellij_session != self.shown[0].zellij_session);
         let zellij_width = if several {
@@ -658,7 +670,7 @@ impl State {
                 output.push("\u{1b}[2m  Previous conversations\u{1b}[0m".to_string());
                 continue;
             };
-            let (icon, color, zellij, project, title, detail, since) = match items[index] {
+            let (icon, color, zellij, title, detail, since) = match items[index] {
                 Item::Running(session) => {
                     let color = match session.status {
                         Status::Idle => "32",
@@ -671,19 +683,18 @@ impl State {
                         Status::Idle => String::new(),
                     };
                     let zellij = session.zellij_session.as_str();
-                    (session.status.icon(), color, zellij, session.project(), session.title(), detail, session.since)
+                    (session.status.icon(), color, zellij, session.title(), detail, session.since)
                 },
-                Item::Past(past) => {
-                    ("↺", "2", "", project(&past.cwd), past.title.as_str(), String::new(), past.modified)
-                },
+                Item::Past(past) => ("↺", "2", "", past.title.as_str(), String::new(), past.modified),
             };
+            let project = project_label(&directory(&items[index]));
             let age = if since > 0 && now >= since { age(now - since) } else { String::new() };
             let number = if index < 9 { (index + 1).to_string() } else { " ".to_string() };
 
             // The title takes the room left by the other columns
             let zellij =
                 if several { format!("{:<zellij_width$}  ", truncate(zellij, zellij_width)) } else { String::new() };
-            let left = format!("{number} {zellij}{:<project_width$}  ", truncate(project, project_width));
+            let left = format!("{number} {zellij}{:<project_width$}  ", truncate(&project, project_width));
             // Narrow (docked): without the detail
             let right =
                 if cols >= 80 { format!("  {:<24}  {:>3}", truncate(&detail, 24), age) } else { format!("  {age:>3}") };
@@ -696,6 +707,7 @@ impl State {
             output.push(format!("{selected}\u{1b}[{color}m{icon}\u{1b}[39m {text}\u{1b}[0m"));
         }
         let empty = items.is_empty();
+        let selected = items.get(self.selected).map(|item| short_directory(&directory(item)));
         drop(items);
 
         self.offset = offset;
@@ -705,8 +717,20 @@ impl State {
             let found = if self.search.is_some() { " found" } else { "" };
             output.push(format!("\u{1b}[2mNo Claude Code session{found}\u{1b}[0m"));
         }
+        // At the bottom: the start of the directory left out if too long
+        let footer = selected.map(|directory| {
+            let room = cols.saturating_sub(5);
+            let length = directory.chars().count();
+            let directory = if length > room {
+                format!("…{}", directory.chars().skip(length + 1 - room).collect::<String>())
+            } else {
+                directory
+            };
+            let blank = height.saturating_sub(output.len()) + 1;
+            format!("{}\u{1b}[2m  ⌂ \u{1b}[22;36m{directory}\u{1b}[0m", "\n".repeat(blank))
+        });
         // Without a newline after the last line: the pane would scroll
-        print!("{}\n{header}\n\n{}", panel::tabs("claude"), output.join("\n"));
+        print!("{}\n{header}\n\n{}{}", panel::tabs("claude"), output.join("\n"), footer.unwrap_or_default());
     }
 }
 

@@ -10,6 +10,9 @@
 //! list, like their key bindings. A double click on the session renames it
 //! (Enter keeps the new name, Esc cancels).
 //!
+//! The directory of the Claude Code session of the focused pane (the one to
+//! resume it in), on the left.
+//!
 //! The runtimes of the focused pane (mise: node, python, ruby), sent by its
 //! shell: `zellij pipe --name bar::runtimes --args
 //! pane_id=$ZELLIJ_PANE_ID,time=$EPOCHREALTIME -- "🤖 25.9.0 🐍 3.14.4"`, on
@@ -32,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{NAME_MARKER, STATE_PIPE, SWITCH_PIPE, SYNC_PIPE, Session, Status};
+use common::{NAME_MARKER, STATE_PIPE, SWITCH_PIPE, SYNC_PIPE, Session, Status, short_directory};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -42,6 +45,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const CLICK_PIPE: &str = "bar::click";
 /// From the shells: the runtimes of their pane
 const RUNTIMES_PIPE: &str = "bar::runtimes";
+/// Longest directory of a Claude Code session
+const MAX_DIRECTORY: usize = 60;
 /// Delay to confirm the close of a tab
 const CONFIRM_CLOSE: Duration = Duration::from_secs(3);
 
@@ -310,6 +315,11 @@ impl ZellijPlugin for State {
             }
             self.targets.push((start, left.width, Target::Session));
             left.push(" ", None, None, false);
+            // The focused pane runs Claude Code: the directory to resume it in
+            if let Some(directory) = self.claude_directory() {
+                left.push(" ✳ ", Some(ORANGE), None, true);
+                left.push(&format!("{directory} "), Some(TERM_CYAN), None, false);
+            }
         }
 
         let mut right = Line::default();
@@ -377,6 +387,21 @@ impl State {
         let end = line.width;
         line.push("  ", None, None, false);
         Some((start, end))
+    }
+
+    /// The directory to resume the Claude Code session of the focused pane
+    /// in (the start left out if too long)
+    fn claude_directory(&self) -> Option<String> {
+        let terminal = self.terminal?;
+        // The sessions of this zellij session
+        let session = self.sessions.iter().find(|s| s.pane_id == terminal)?;
+        let directory = short_directory(if session.directory.is_empty() { &session.cwd } else { &session.directory });
+        let length = directory.chars().count();
+        Some(if length > MAX_DIRECTORY {
+            format!("…{}", directory.chars().skip(length + 1 - MAX_DIRECTORY).collect::<String>())
+        } else {
+            directory
+        })
     }
 
     /// The runtimes of the focused pane: the versions in green, a virtual

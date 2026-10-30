@@ -6,7 +6,8 @@
   zellij sessions. Their tabs are named after the conversation, with its status
   (`⚙` working, `⚠` waiting for a permission or an answer, `✓` done), and a
   floating list jumps to any of them or resumes a previous conversation.
-- **bar**: a one-line status bar: the mode, the session, the tabs, the Git
+- **bar**: a one-line status bar: the mode, the session (and the directory
+  of the Claude Code session of the focused pane), the tabs, the Git
   and Claude Code buttons and the time. A click on a tab goes to it, a double
   click renames it, its `✕` closes the active tab (a second click confirms);
   the Git button opens the git panel, the Claude Code button (`✳` and the
@@ -38,7 +39,9 @@ load_plugins {
 The list, from a key binding: the sessions, then the previous conversations
 (the latest transcripts of Claude Code), resumed in a new tab
 (`claude --resume`, in the directory it looks in: the one of their projects
-folder, even if the conversation went to another one, a worktree). `↑↓`/`jk` and Enter, a digit or a
+folder, even if the conversation went to another one, a worktree). Their
+project shows the worktree (`Platform ⎇ fix-login`), the directory of the
+selected one is at the bottom. `↑↓`/`jk` and Enter, a digit or a
 click opens one, `/` searches (each word, in the project and the title), `p`
 docks the list on the right (it then stays open), Tab shows the git panel in
 its place, Esc closes. With
