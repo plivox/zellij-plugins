@@ -186,6 +186,11 @@ impl ZellijPlugin for State {
         }
     }
 
+    fn pipe(&mut self, message: PipeMessage) -> bool {
+        self.panel.pipe(&message);
+        false
+    }
+
     fn render(&mut self, rows: usize, cols: usize) {
         self.render_panel(rows, cols);
     }
@@ -311,7 +316,7 @@ impl State {
             BareKey::Char('s') | BareKey::Char(' ') => self.stage(),
             BareKey::Char('g') => self.open(CommandToRun::new("lazygit")),
             BareKey::Char('r') => self.refresh(),
-            BareKey::Tab => panel::switch(panel::other("git")),
+            BareKey::Tab => self.panel.switch(panel::other("git")),
             BareKey::Char('p') => self.panel.toggle(),
             BareKey::Esc | BareKey::Char('q') => close_self(),
             _ => return false,

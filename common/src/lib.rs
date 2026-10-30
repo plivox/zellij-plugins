@@ -15,8 +15,12 @@ pub const STATE_PIPE: &str = "claude::state";
 pub const SYNC_PIPE: &str = "claude::sync";
 
 /// From the panels to the bars: the panel to show in place of the focused
-/// one (its name: git or claude).
+/// one (its name: git or claude), floating or not (`floating` argument).
 pub const SWITCH_PIPE: &str = "panel::switch";
+/// From a panel starting to the bars: its name, to know if it was launched
+/// in place of a floating panel; the answer to it: floating or docked.
+pub const HELLO_PIPE: &str = "panel::hello";
+pub const MODE_PIPE: &str = "panel::mode";
 
 /// Ends the tab names set by the plugins (and by the zellij module of
 /// Prezto): a tab without it was renamed by hand and is left alone.

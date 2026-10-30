@@ -226,6 +226,9 @@ impl ZellijPlugin for State {
     }
 
     fn pipe(&mut self, message: PipeMessage) -> bool {
+        if self.list && self.panel.pipe(&message) {
+            return false;
+        }
         match message.name.as_str() {
             EVENT_PIPE if !self.list => {
                 self.event(&message);
@@ -560,7 +563,7 @@ impl State {
             },
             BareKey::Char('/') => self.search = Some(String::new()),
             BareKey::Char('p') => self.panel.toggle(),
-            BareKey::Tab => panel::switch(panel::other("claude")),
+            BareKey::Tab => self.panel.switch(panel::other("claude")),
             BareKey::Down | BareKey::Char('j') if count > 0 => self.selected = (self.selected + 1) % count,
             BareKey::Up | BareKey::Char('k') if count > 0 => self.selected = (self.selected + count - 1) % count,
             BareKey::Char(digit @ '1'..='9') => {

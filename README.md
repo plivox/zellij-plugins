@@ -20,7 +20,9 @@
   it on the right.
 
 The git panel and the list of claude are side panels: one at a time, their
-tabs on the first line (or Tab) show the other in place.
+tabs on the first line (or Tab) show the other in place, floating or docked
+like it (with its width). `p` docks a panel on the right (35% of the width)
+or floats it again.
 
 The release has the plugins, the Claude Code hook (`claude-hook.sh`) and
 their SHA256 (`sha256sums.txt`).

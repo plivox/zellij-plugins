@@ -35,7 +35,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{NAME_MARKER, STATE_PIPE, SWITCH_PIPE, SYNC_PIPE, Session, Status, short_directory};
+use common::{
+    HELLO_PIPE, MODE_PIPE, NAME_MARKER, STATE_PIPE, SWITCH_PIPE, SYNC_PIPE, Session, Status, short_directory,
+};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -45,6 +47,8 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const CLICK_PIPE: &str = "bar::click";
 /// From the shells: the runtimes of their pane
 const RUNTIMES_PIPE: &str = "bar::runtimes";
+/// A panel launched in place of another one asks how this long after
+const SWITCH_ANSWER: Duration = Duration::from_secs(5);
 /// Longest directory of a Claude Code session
 const MAX_DIRECTORY: usize = 60;
 /// Delay to confirm the close of a tab
@@ -116,6 +120,9 @@ struct State {
     /// The last click on the session; its new name typed, the pane focused
     /// before
     session_click: Option<SystemTime>,
+    /// The panel launched in place of another one: floating like it, and
+    /// when
+    switched: Option<(String, bool, SystemTime)>,
     session_name: Option<String>,
     focused_before: Option<PaneId>,
     /// The tab to close on a second click on its button, until this time
@@ -260,10 +267,34 @@ impl ZellijPlugin for State {
             SWITCH_PIPE
                 if self.tab.is_some() && self.tab == self.tabs.iter().find(|t| t.active).map(|t| t.position) =>
             {
-                match message.payload.as_deref() {
-                    Some("git") => self.launch(self.git_url.as_deref(), &self.git_config(), true),
-                    Some("claude") => self.launch(self.claude_url.as_deref(), &self.claude_config(), true),
-                    _ => {},
+                let (url, configuration) = match message.payload.as_deref() {
+                    Some("git") => (self.git_url.as_deref(), self.git_config()),
+                    Some("claude") => (self.claude_url.as_deref(), self.claude_config()),
+                    _ => return false,
+                };
+                if url.is_some() {
+                    let floating = message.args.get("floating").is_some_and(|f| f == "true");
+                    let name = message.payload.clone().unwrap_or_default();
+                    self.switched = Some((name, floating, SystemTime::now()));
+                }
+                self.launch(url, &configuration, true);
+                false
+            },
+            // A panel starting: floating if launched in place of a floating
+            // one
+            HELLO_PIPE => {
+                let PipeSource::Plugin(id) = message.source else {
+                    return false;
+                };
+                let recent = |time: &SystemTime| time.elapsed().is_ok_and(|e| e < SWITCH_ANSWER);
+                if let Some((_, floating, _)) = self
+                    .switched
+                    .take_if(|(name, _, time)| message.payload.as_deref() == Some(name.as_str()) && recent(time))
+                {
+                    let mode = if floating { "floating" } else { "docked" };
+                    pipe_message_to_plugin(
+                        MessageToPlugin::new(MODE_PIPE).with_destination_plugin_id(id).with_payload(mode),
+                    );
                 }
                 false
             },
