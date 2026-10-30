@@ -1,7 +1,9 @@
 //! The frame of the side panel, whatever it shows: floating, or docked on
 //! the right in the tiled panes (sized when it docks, its width kept after),
 //! its tabs on the first line, its buttons on the right of them (narrower,
-//! wider, close).
+//! wider, dock or float, close: zellij resizes a floating pane dragged by its
+//! frame only with Ctrl, a right click in some terminals of macOS, and does
+//! not send a drag to a plugin).
 
 use std::time::{Duration, SystemTime};
 
@@ -29,9 +31,10 @@ pub enum Button {
     Tab(usize),
     Narrower,
     Wider,
+    /// Docks it or floats it again
+    Mode,
     Close,
 }
-const BUTTONS: [(Button, &str); 3] = [(Button::Narrower, " − "), (Button::Wider, " + "), (Button::Close, " ✕ ")];
 
 #[derive(Default)]
 pub struct Frame {
@@ -44,9 +47,11 @@ pub struct Frame {
     waits: u8,
     ticking: bool,
     columns: usize,
-    /// Floating: its width once made narrower or wider (kept when it floats
-    /// again)
+    /// Floating: its size when it docked (kept when it floats again)
     width: Option<usize>,
+    height: Option<usize>,
+    /// The width of its content, from its render
+    cols: usize,
     /// Focused, the button under the mouse (and when)
     focused: bool,
     hover: Option<(Button, SystemTime)>,
@@ -68,20 +73,29 @@ impl Frame {
     pub fn toggle(&mut self) {
         let Some(floating) = self.floating else { return };
         let id = get_plugin_ids().plugin_id;
+        if floating {
+            // Resized here or by zellij (Ctrl and the wheel)
+            if let Some(me) = get_pane_info(PaneId::Plugin(id)).filter(|me| me.is_floating) {
+                self.width = Some(me.pane_columns);
+                self.height = Some(me.pane_rows);
+            }
+        }
         toggle_pane_embed_or_eject_for_pane_id(PaneId::Plugin(id));
         if floating {
             self.resize();
             // Kept (zellij focuses the pane it docks next to)
             focus_plugin_pane(id, false, false);
         } else {
-            match self.width.filter(|_| self.columns > 0) {
-                // On the right, as wide as it was
-                Some(width) => {
-                    let x = (self.columns * 99 / 100).saturating_sub(width);
-                    place([&x.to_string(), FLOATING[1], &width.to_string(), FLOATING[3]]);
-                },
-                None => place(FLOATING),
+            // On the right, as large as it was
+            let [mut x, y, mut width, mut height] = FLOATING.map(String::from);
+            if let Some(columns) = self.width.filter(|_| self.columns > 0) {
+                x = (self.columns * 99 / 100).saturating_sub(columns).to_string();
+                width = columns.to_string();
             }
+            if let Some(rows) = self.height {
+                height = rows.to_string();
+            }
+            place([&x, &y, &width, &height]);
         }
         self.floating = Some(!floating);
     }
@@ -101,12 +115,16 @@ impl Frame {
         let width = if wider { me.pane_columns + step } else { me.pane_columns.saturating_sub(step) };
         let width = width.clamp(MIN_FLOATING.min(me.pane_columns), total);
         let x = (me.pane_x + me.pane_columns).saturating_sub(width);
-        self.width = Some(width);
         // Its height and its line kept
         let size = |value: usize| Some(value.to_string());
         if let Some(coordinates) = FloatingPaneCoordinates::new(size(x), None, size(width), None, None, None) {
             change_floating_panes_coordinates(vec![(PaneId::Plugin(id), coordinates)]);
         }
+    }
+
+    /// The width of its content, from its render
+    pub fn set_cols(&mut self, cols: usize) {
+        self.cols = cols;
     }
 
     /// Shown (the floating panes may be hidden) and focused
@@ -126,14 +144,14 @@ impl Frame {
     }
 
     /// The mouse over the panel: the button under it, of the first line (the
-    /// tabs of these labels, `cols` wide)
-    pub fn hover(&mut self, line: isize, column: usize, labels: &[&str], cols: usize) {
+    /// tabs of these labels)
+    pub fn hover(&mut self, line: isize, column: usize, labels: &[&str]) {
         // Out of the panel (sent with the click that focuses it): kept
         if column >= u16::MAX as usize {
             return;
         }
         self.hover =
-            if line == 0 { button_at(column, labels, cols).map(|button| (button, SystemTime::now())) } else { None };
+            if line == 0 { self.button_at(column, labels).map(|button| (button, SystemTime::now())) } else { None };
     }
 
     /// From its update: floating or docked (sized when it docks), focused.
@@ -155,6 +173,72 @@ impl Frame {
         }
         self.floating = Some(me.is_floating);
         clicked.map(|(button, _)| button)
+    }
+
+    /// The first line: the tabs as pills (the colors of the bar), `current`
+    /// highlighted, the buttons on the right
+    pub fn tabs(&self, labels: &[&str], current: usize) -> String {
+        let tabs = labels
+            .iter()
+            .enumerate()
+            .map(|(index, label)| {
+                if index == current {
+                    // Nord: polar night on frost
+                    format!("\u{1b}[38;2;46;52;64;48;2;136;192;208;1m{label}\u{1b}[0m")
+                } else {
+                    // Comment on polar night
+                    format!("\u{1b}[38;2;97;110;136;48;2;59;66;82m{label}\u{1b}[0m")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let Some(start) = self.buttons_start(labels) else { return tabs };
+        let gap = start - tabs_width(labels);
+        // Snow storm on polar night, close in aurora red
+        let buttons: String = self
+            .buttons()
+            .iter()
+            .map(|(button, label)| {
+                let fg = if *button == Button::Close { "191;97;106" } else { "216;222;233" };
+                format!("\u{1b}[38;2;{fg};48;2;59;66;82m{label}\u{1b}[0m")
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        format!("{tabs}{}{buttons}", " ".repeat(gap))
+    }
+
+    /// The button at this column of the first line (one column between them)
+    pub fn button_at(&self, column: usize, labels: &[&str]) -> Option<Button> {
+        let mut start = 0;
+        for (index, label) in labels.iter().enumerate() {
+            let end = start + label.chars().count();
+            if (start..end).contains(&column) {
+                return Some(Button::Tab(index));
+            }
+            start = end + 1;
+        }
+        let mut start = self.buttons_start(labels)?;
+        for (button, label) in self.buttons() {
+            let end = start + label.chars().count();
+            if (start..end).contains(&column) {
+                return Some(button);
+            }
+            start = end + 1;
+        }
+        None
+    }
+
+    /// − and + its width; docked, ⧉ floats it; floating, ⇥ docks it on the
+    /// right; ✕ closes it
+    fn buttons(&self) -> [(Button, &'static str); 4] {
+        let mode = if self.floating() { " ⇥ " } else { " ⧉ " };
+        [(Button::Narrower, " − "), (Button::Wider, " + "), (Button::Mode, mode), (Button::Close, " ✕ ")]
+    }
+
+    /// Where the buttons start, on the right: none when they would not fit
+    fn buttons_start(&self, labels: &[&str]) -> Option<usize> {
+        let width = self.buttons().iter().map(|(_, label)| label.chars().count() + 1).sum::<usize>() - 1;
+        self.cols.checked_sub(width).filter(|start| *start > tabs_width(labels))
     }
 
     /// A timer of the frame (shorter than the one of the panel): sizes it
@@ -218,66 +302,8 @@ impl Frame {
     }
 }
 
-/// The first line, `cols` wide: the tabs as pills (the colors of the bar),
-/// `current` highlighted, the buttons on the right
-pub fn tabs(labels: &[&str], current: usize, cols: usize) -> String {
-    let tabs = labels
-        .iter()
-        .enumerate()
-        .map(|(index, label)| {
-            if index == current {
-                // Nord: polar night on frost
-                format!("\u{1b}[38;2;46;52;64;48;2;136;192;208;1m{label}\u{1b}[0m")
-            } else {
-                // Comment on polar night
-                format!("\u{1b}[38;2;97;110;136;48;2;59;66;82m{label}\u{1b}[0m")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    let Some(start) = buttons_start(labels, cols) else { return tabs };
-    let gap = start - tabs_width(labels);
-    // Snow storm on polar night, close in aurora red
-    let buttons: String = BUTTONS
-        .iter()
-        .map(|(button, label)| {
-            let fg = if *button == Button::Close { "191;97;106" } else { "216;222;233" };
-            format!("\u{1b}[38;2;{fg};48;2;59;66;82m{label}\u{1b}[0m")
-        })
-        .collect::<Vec<_>>()
-        .join(" ");
-    format!("{tabs}{}{buttons}", " ".repeat(gap))
-}
-
-/// The button at this column of the first line (one column between them)
-pub fn button_at(column: usize, labels: &[&str], cols: usize) -> Option<Button> {
-    let mut start = 0;
-    for (index, label) in labels.iter().enumerate() {
-        let end = start + label.chars().count();
-        if (start..end).contains(&column) {
-            return Some(Button::Tab(index));
-        }
-        start = end + 1;
-    }
-    let mut start = buttons_start(labels, cols)?;
-    for (button, label) in BUTTONS {
-        let end = start + label.chars().count();
-        if (start..end).contains(&column) {
-            return Some(button);
-        }
-        start = end + 1;
-    }
-    None
-}
-
 fn tabs_width(labels: &[&str]) -> usize {
     labels.iter().map(|label| label.chars().count() + 1).sum::<usize>().saturating_sub(1)
-}
-
-/// Where the buttons start, on the right: none when they would not fit
-fn buttons_start(labels: &[&str], cols: usize) -> Option<usize> {
-    let width = BUTTONS.iter().map(|(_, label)| label.chars().count() + 1).sum::<usize>() - 1;
-    cols.checked_sub(width).filter(|start| *start > tabs_width(labels))
 }
 
 /// Floating, shown (the floating panes may be hidden)

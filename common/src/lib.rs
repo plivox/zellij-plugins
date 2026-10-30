@@ -19,6 +19,9 @@ pub const HELLO_PIPE: &str = "panel::hello";
 /// From the claude plugin to a side panel already open: this view, focused
 /// (closed if it was already).
 pub const SHOW_PIPE: &str = "panel::show";
+/// The titles of the side panel, by view (the bar highlights its button)
+pub const GIT_TITLE: &str = "Git";
+pub const CLAUDE_TITLE: &str = "Claude Code";
 
 /// Ends the tab names set by the plugins (and by the zellij module of
 /// Prezto): a tab without it was renamed by hand and is left alone.

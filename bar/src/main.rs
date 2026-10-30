@@ -8,8 +8,9 @@
 //! a few seconds) and closes it. A click on the Git button opens the side
 //! panel of the tab on its Git view, on the Claude Code button (✳ and the
 //! sessions by status) on its Claude view, like their key bindings (through
-//! the claude plugin, which opens it). A double click on the session renames
-//! it (Enter keeps the new name, Esc cancels).
+//! the claude plugin, which opens it); the button of the view the panel shows
+//! on a background. A double click on the session renames it (Enter keeps the
+//! new name, Esc cancels).
 //!
 //! The directory of the Claude Code session of the focused pane (the one to
 //! resume it in), on the left.
@@ -30,7 +31,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status, short_directory};
+use common::{
+    CLAUDE_TITLE, GIT_TITLE, NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status, short_directory,
+};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -90,6 +93,8 @@ struct State {
     /// The Git and Claude Code buttons
     git: bool,
     claude: bool,
+    /// The side panel of the tab: the view it shows (its title), floating
+    panel: Option<(String, bool)>,
 
     mode: InputMode,
     session: String,
@@ -209,6 +214,19 @@ impl ZellijPlugin for State {
                 });
                 let changed = focused.is_some() && focused != self.terminal;
                 self.terminal = focused.or(self.terminal);
+                // The side panel: a claude plugin not in the background
+                let panel = self.tab.and_then(|tab| manifest.panes.get(&tab)).and_then(|panes| {
+                    panes
+                        .iter()
+                        .find(|p| {
+                            p.is_plugin
+                                && !p.is_suppressed
+                                && p.plugin_url.as_deref().is_some_and(|url| url.ends_with("/claude.wasm"))
+                        })
+                        .map(|p| (p.title.clone(), p.is_floating))
+                });
+                let changed = changed || panel != self.panel;
+                self.panel = panel;
                 changed
             },
             Event::Key(key) => self.session_key(key),
@@ -303,7 +321,11 @@ impl ZellijPlugin for State {
         let mut right = Line::default();
         if status && self.git {
             let start = right.width;
-            right.push("⎇ git", Some(TERM_BLUE), None, false);
+            // Shown in the side panel: on a background
+            match self.panel_view() == Some(GIT_TITLE) {
+                true => right.push(" ⎇ git ", Some(TERM_BLUE), Some(TERM_GRAY), true),
+                false => right.push("⎇ git", Some(TERM_BLUE), None, false),
+            }
             buttons.push((start, right.width, Target::Git));
             right.push("  ", None, None, false);
         }
@@ -346,6 +368,14 @@ impl State {
         Some(Utc::now().with_timezone(&tz).format("%H:%M").to_string())
     }
 
+    /// The view the side panel of the tab shows, when shown (floating, only
+    /// with the floating panes)
+    fn panel_view(&self) -> Option<&str> {
+        let (title, floating) = self.panel.as_ref()?;
+        let shown = self.tabs.iter().any(|t| Some(t.position) == self.tab && t.are_floating_panes_visible);
+        (shown || !floating).then_some(title.as_str())
+    }
+
     /// The Claude Code button: ✳ and the count of the sessions by status,
     /// the ones that need attention first; returns its columns in the line.
     fn claude_summary(&self, line: &mut Line) -> Option<(usize, usize)> {
@@ -353,16 +383,24 @@ impl State {
             return None;
         }
         let start = line.width;
-        line.push("✳", Some(ORANGE), None, true);
+        // Shown in the side panel: on a background
+        let bg = (self.panel_view() == Some(CLAUDE_TITLE)).then_some(TERM_GRAY);
+        if bg.is_some() {
+            line.push(" ", None, bg, false);
+        }
+        line.push("✳", Some(ORANGE), bg, true);
         if self.sessions.is_empty() {
-            line.push(" claude", Some(TERM_BLUE), None, false);
+            line.push(" claude", Some(TERM_BLUE), bg, false);
         }
         for status in [Status::Waiting, Status::Working, Status::Idle] {
             let count = self.sessions.iter().filter(|s| s.status == status).count();
             if count > 0 {
                 let text = format!(" {} {count}", status.icon());
-                line.push(&text, Some(status_term_color(status)), None, status == Status::Waiting);
+                line.push(&text, Some(status_term_color(status)), bg, status == Status::Waiting);
             }
+        }
+        if bg.is_some() {
+            line.push(" ", None, bg, false);
         }
         let end = line.width;
         line.push("  ", None, None, false);

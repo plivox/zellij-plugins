@@ -1,20 +1,20 @@
 //! The side panel: its tabs (Git, Claude) on the first line, floating or
 //! docked on the right whatever it shows (its frame). Tab or a click on a tab
-//! shows the other view, `p` docks the panel or floats it again, `-` and `+`
-//! (or the buttons on the right of the tabs) make it narrower or wider, Esc
-//! (or ✕) closes it.
+//! shows the other view; `-` and `+` make the panel narrower or wider, `p`
+//! docks it or floats it again, Esc closes it (or the buttons on the right of
+//! the tabs: − + ⧉ or ⇥, ✕).
 
 use std::collections::BTreeMap;
 
-use common::{HELLO_PIPE, SHOW_PIPE, STATE_PIPE};
+use common::{CLAUDE_TITLE, GIT_TITLE, HELLO_PIPE, SHOW_PIPE, STATE_PIPE};
 use zellij_tile::prelude::*;
 
-use crate::frame::{self, Button, Frame};
+use crate::frame::{Button, Frame};
 use crate::git::Git;
 use crate::list::List;
 
 /// The views: their name (to show one), their tab and their pane title
-const VIEWS: [(&str, &str, &str); 2] = [("git", " ⎇ Git ", "Git"), ("claude", " ✳ Claude ", "Claude Code")];
+const VIEWS: [(&str, &str, &str); 2] = [("git", " ⎇ Git ", GIT_TITLE), ("claude", " ✳ Claude ", CLAUDE_TITLE)];
 const GIT: usize = 0;
 const CLAUDE: usize = 1;
 /// Seconds between two reads of the shown view (the changes, the sessions)
@@ -27,8 +27,6 @@ pub struct Panel {
     git: Git,
     list: List,
     visible: bool,
-    /// The width it was rendered at (where its buttons are)
-    cols: usize,
 }
 
 impl Panel {
@@ -114,11 +112,11 @@ impl Panel {
             },
             Event::Key(key) => self.key(&key),
             Event::Mouse(Mouse::Hover(line, column)) => {
-                self.frame.hover(line, column, &labels(), self.cols);
+                self.frame.hover(line, column, &labels());
                 false
             },
             Event::Mouse(Mouse::LeftClick(0, column)) => {
-                if let Some(button) = frame::button_at(column, &labels(), self.cols) {
+                if let Some(button) = self.frame.button_at(column, &labels()) {
                     self.click(button);
                 }
                 true
@@ -166,7 +164,7 @@ impl Panel {
     }
 
     pub fn render(&mut self, rows: usize, cols: usize) {
-        self.cols = cols;
+        self.frame.set_cols(cols);
         let mut lines = match self.view {
             GIT => self.git.render(rows.saturating_sub(1), cols),
             _ => self.list.render(rows.saturating_sub(1), cols),
@@ -174,7 +172,7 @@ impl Panel {
         // More lines than rows would scroll the pane
         lines.truncate(rows.saturating_sub(1));
         // Without a newline after the last line: the pane would scroll
-        print!("{}\n{}", frame::tabs(&labels(), self.view, cols), lines.join("\n"));
+        print!("{}\n{}", self.frame.tabs(&labels(), self.view), lines.join("\n"));
     }
 
     fn key(&mut self, key: &KeyWithModifier) -> bool {
@@ -206,6 +204,7 @@ impl Panel {
             Button::Tab(view) => self.show(view),
             Button::Narrower => self.frame.widen(false),
             Button::Wider => self.frame.widen(true),
+            Button::Mode => self.frame.toggle(),
             Button::Close => close_self(),
         }
     }

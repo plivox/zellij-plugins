@@ -72,9 +72,13 @@ bind "Alt a" { MessagePlugin { name "panel::open"; payload "claude"; } }
 It opens docked on the right of the tallest pane (35% of the width), or
 floating, like the last panel of the tab. Floating or docked, its width and
 its focus are the panel's, whatever it shows: its tabs on the first line (or
-Tab) switch the view, `p` docks it or floats it again; its buttons on the
-right of the tabs (or `-` and `+`) make it narrower or wider (floating, its
-width kept when it floats again), ✕ (or Esc) closes it.
+Tab) switch the view. Its buttons on the right of the tabs: − and + (or `-`
+and `+`) make it narrower or wider, ⧉ floats it and ⇥ docks it again (or
+`p`), ✕ (or Esc) closes it. Floating, it keeps its size when it docks and
+floats again; zellij also resizes it with Ctrl and the wheel over it (with
+Ctrl and a drag of its frame too, a right click in some terminals of macOS;
+zellij 0.45 sends no drag to a plugin, the panel cannot be resized by its
+edges).
 
 **Git**: the changes of the focused terminal pane (the last one, the panel
 focused), read again every 2 seconds while shown: staged, not staged,
@@ -119,7 +123,8 @@ second).
 
 All optional: `timezone` of the time (no time without it), `hint` before the
 time, `git` and `claude` (set) for their buttons, which open the side panel
-like the key bindings (`panel::open`, to the claude plugin). A double click
+like the key bindings (`panel::open`, to the claude plugin), the one of the
+view the side panel of the tab shows on a background. A double click
 on the session renames it (Enter keeps the new name, Esc cancels).
 
 The runtimes of the focused pane (e.g. mise: `🤖 25.9.0 🐍 3.14.4(venv)`, the
