@@ -72,7 +72,9 @@ bind "Alt a" { MessagePlugin { name "panel::open"; payload "claude"; } }
 It opens docked on the right of the tallest pane (35% of the width), or
 floating, like the last panel of the tab. Floating or docked, its width and
 its focus are the panel's, whatever it shows: its tabs on the first line (or
-Tab) switch the view, `p` docks it or floats it again, Esc closes it.
+Tab) switch the view, `p` docks it or floats it again; its buttons on the
+right of the tabs (or `-` and `+`) make it narrower or wider (floating, its
+width kept when it floats again), ✕ (or Esc) closes it.
 
 **Git**: the changes of the focused terminal pane (the last one, the panel
 focused), read again every 2 seconds while shown: staged, not staged,
