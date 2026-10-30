@@ -1,27 +1,18 @@
-//! Git changes of the focused pane, in a floating panel (from a key binding).
+//! The Git view of the panel: the changes of the focused pane.
 //!
 //! Follows the working directory of the focused terminal pane and lists its
 //! changes: staged, not staged, untracked, in conflict, with the lines added
 //! and removed. Enter (or a click) shows the diff of a file, `s` stages or
-//! unstages it, `g` opens lazygit, `p` docks the panel on the right (in the
-//! tiled panes) or floats it again, Tab (or its tab) shows the list of claude
-//! in its place, Esc closes it.
-//!
-//! Configuration: `docked "true"` to start docked.
+//! unstages it, `g` opens lazygit.
 
 use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 
-use common::panel::{self, Panel};
 use common::truncate;
 use zellij_tile::prelude::*;
 
 /// Lines above the files
-const HEADER: usize = 3;
-/// Seconds between two reads of the changes while the panel is visible
-const REFRESH_INTERVAL: f64 = 2.0;
-/// Floating: on the right
-const FLOATING: [&str; 4] = ["55%", "5%", "44%", "90%"];
+const HEADER: usize = 2;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 enum Section {
@@ -61,12 +52,8 @@ struct Entry {
 }
 
 #[derive(Default)]
-struct State {
+pub struct Git {
     permitted: bool,
-    visible: bool,
-    /// Docked at the start
-    docked: bool,
-    panel: Panel,
     /// The focused terminal pane and its working directory
     pane: Option<u32>,
     cwd: Option<PathBuf>,
@@ -87,118 +74,45 @@ struct State {
     lines: Vec<Option<usize>>,
 }
 
-register_plugin!(State);
-
-impl ZellijPlugin for State {
-    fn load(&mut self, configuration: BTreeMap<String, String>) {
-        self.docked = configuration.get("docked").is_some_and(|docked| docked == "true");
-        request_permission(&[
-            PermissionType::ReadApplicationState,
-            PermissionType::ChangeApplicationState,
-            PermissionType::RunCommands,
-            // The tabs of the panels, through the bar
-            PermissionType::MessageAndLaunchOtherPlugins,
-        ]);
-        subscribe(&[
-            EventType::PermissionRequestResult,
-            EventType::TabUpdate,
-            EventType::PaneUpdate,
-            EventType::CwdChanged,
-            EventType::RunCommandResult,
-            EventType::Visible,
-            EventType::Timer,
-            EventType::Key,
-            EventType::Mouse,
-        ]);
+impl Git {
+    pub fn start(&mut self) {
+        self.permitted = true;
+        self.follow_cwd();
     }
 
-    fn update(&mut self, event: Event) -> bool {
-        match event {
-            Event::PermissionRequestResult(PermissionStatus::Granted) => {
-                self.permitted = true;
-                self.visible = true;
-                rename_plugin_pane(get_plugin_ids().plugin_id, "Git");
-                self.panel = Panel::new("git");
-                self.panel.start(self.docked);
-                self.follow_cwd();
-                set_timeout(REFRESH_INTERVAL);
-                true
-            },
-            Event::TabUpdate(tabs) => {
-                self.panel.set_tabs(&tabs);
-                if let Some(tab) = tabs.iter().find(|tab| tab.active) {
-                    self.active_tab = tab.position;
-                }
-                false
-            },
-            Event::PaneUpdate(manifest) => {
-                self.panel.update(&manifest, FLOATING);
-                let focused = manifest.panes.get(&self.active_tab).and_then(|panes| {
-                    panes.iter().find(|pane| !pane.is_plugin && pane.is_focused && !pane.is_floating).map(|p| p.id)
-                });
-                if focused.is_some() && focused != self.pane {
-                    self.pane = focused;
-                    self.follow_cwd();
-                }
-                false
-            },
-            Event::CwdChanged(PaneId::Terminal(id), cwd, _) if Some(id) == self.pane => {
-                self.set_cwd(cwd);
-                true
-            },
-            Event::Visible(visible) => {
-                self.visible = visible;
-                if visible && self.permitted {
-                    self.follow_cwd();
-                    set_timeout(REFRESH_INTERVAL);
-                }
-                false
-            },
-            Event::Timer(elapsed) if self.panel.timer(elapsed) => false,
-            Event::Timer(_) => {
-                if self.visible {
-                    self.refresh();
-                    set_timeout(REFRESH_INTERVAL);
-                }
-                false
-            },
-            Event::RunCommandResult(code, stdout, stderr, context) => self.result(code, &stdout, &stderr, &context),
-            Event::Key(key) => self.key(key),
-            Event::Mouse(Mouse::LeftClick(0, column)) => {
-                self.panel.click(0, column);
-                false
-            },
-            Event::Mouse(Mouse::Hover(line, column)) => {
-                self.panel.hover(line, column);
-                false
-            },
-            Event::Mouse(Mouse::LeftClick(line, _)) => {
-                let row = (line.max(0) as usize).checked_sub(HEADER);
-                if let Some(index) = row.and_then(|row| self.lines.get(row).copied().flatten()) {
-                    self.selected = index;
-                    self.diff();
-                }
-                true
-            },
-            Event::Mouse(Mouse::ScrollDown(_)) => self.key(KeyWithModifier::new(BareKey::Down)),
-            Event::Mouse(Mouse::ScrollUp(_)) => self.key(KeyWithModifier::new(BareKey::Up)),
-            _ => false,
+    pub fn set_tabs(&mut self, tabs: &[TabInfo]) {
+        if let Some(tab) = tabs.iter().find(|tab| tab.active) {
+            self.active_tab = tab.position;
         }
     }
 
-    fn pipe(&mut self, message: PipeMessage) -> bool {
-        self.panel.pipe(&message);
-        false
+    /// The focused terminal pane of the active tab; the panel focused, the
+    /// last one, else the largest
+    pub fn set_panes(&mut self, manifest: &PaneManifest) {
+        let Some(panes) = manifest.panes.get(&self.active_tab) else { return };
+        let terminals = || panes.iter().filter(|pane| !pane.is_plugin && !pane.is_floating && pane.is_selectable);
+        let mut focused = terminals().find(|pane| pane.is_focused).map(|pane| pane.id);
+        if focused.is_none() && !terminals().any(|pane| Some(pane.id) == self.pane) {
+            focused = terminals().max_by_key(|pane| pane.pane_rows * pane.pane_columns).map(|pane| pane.id);
+        }
+        if focused.is_some() && focused != self.pane {
+            self.pane = focused;
+            self.follow_cwd();
+        }
     }
 
-    fn render(&mut self, rows: usize, cols: usize) {
-        self.render_panel(rows, cols);
+    /// The working directory of a pane changed; whether it is the followed
+    /// one
+    pub fn cwd_changed(&mut self, id: u32, cwd: PathBuf) -> bool {
+        if Some(id) != self.pane {
+            return false;
+        }
+        self.set_cwd(cwd);
+        true
     }
-}
 
-impl State {
     /// The working directory of the focused pane
-    fn follow_cwd(&mut self) {
+    pub fn follow_cwd(&mut self) {
         if !self.permitted {
             return;
         }
@@ -218,7 +132,7 @@ impl State {
 
     /// Reads the changes: the status, the stats of the staged and not staged
     /// files
-    fn refresh(&self) {
+    pub fn refresh(&self) {
         if self.permitted {
             self.git(&["status", "--porcelain=v1", "--branch", "--untracked-files=all", "-z"], "status");
             self.git(&["diff", "--numstat", "-z"], "changes");
@@ -230,34 +144,42 @@ impl State {
         let Some(cwd) = &self.cwd else { return };
         let mut command = vec!["git", "--no-optional-locks"];
         command.extend(args);
-        let context = BTreeMap::from([("kind".to_string(), kind.to_string())]);
+        let context = BTreeMap::from([("git".to_string(), kind.to_string())]);
         run_command_with_env_variables_and_cwd(&command, BTreeMap::new(), cwd.clone(), context);
     }
 
-    fn result(&mut self, code: Option<i32>, stdout: &[u8], stderr: &[u8], context: &BTreeMap<String, String>) -> bool {
+    /// The result of a git command (`git` in its context); None for another
+    /// command, else whether to render
+    pub fn result(
+        &mut self,
+        code: Option<i32>,
+        stdout: &[u8],
+        stderr: &[u8],
+        context: &BTreeMap<String, String>,
+    ) -> Option<bool> {
         let output = String::from_utf8_lossy(stdout);
-        match context.get("kind").map(String::as_str) {
-            Some("status") if code != Some(0) => {
+        match context.get("git")?.as_str() {
+            "status" if code != Some(0) => {
                 self.error = Some(String::from_utf8_lossy(stderr).lines().next().unwrap_or_default().to_string());
                 self.entries.clear();
                 self.branch.clear();
             },
-            Some("status") => {
+            "status" => {
                 self.error = None;
                 self.status(&output);
             },
-            Some(kind @ ("changes" | "staged")) if code == Some(0) => {
+            kind @ ("changes" | "staged") if code == Some(0) => {
                 let staged = kind == "staged";
                 self.stats.retain(|(entry_staged, _), _| *entry_staged != staged);
                 self.stats.extend(numstat(&output).into_iter().map(|(path, stat)| ((staged, path), stat)));
                 self.apply_stats();
             },
             // After a stage or an unstage
-            Some("action") => self.refresh(),
-            _ => return false,
+            "action" => self.refresh(),
+            _ => return Some(false),
         }
         self.selected = self.selected.min(self.entries.len().saturating_sub(1));
-        true
+        Some(true)
     }
 
     /// `git status --porcelain=v1 --branch -z`
@@ -307,7 +229,7 @@ impl State {
         }
     }
 
-    fn key(&mut self, key: KeyWithModifier) -> bool {
+    pub fn key(&mut self, key: &KeyWithModifier) -> bool {
         let count = self.entries.len();
         match key.bare_key {
             BareKey::Down | BareKey::Char('j') if count > 0 => self.selected = (self.selected + 1) % count,
@@ -316,12 +238,17 @@ impl State {
             BareKey::Char('s') | BareKey::Char(' ') => self.stage(),
             BareKey::Char('g') => self.open(CommandToRun::new("lazygit")),
             BareKey::Char('r') => self.refresh(),
-            BareKey::Tab => self.panel.switch(panel::other("git")),
-            BareKey::Char('p') => self.panel.toggle(),
-            BareKey::Esc | BareKey::Char('q') => close_self(),
             _ => return false,
         }
         true
+    }
+
+    /// A click on a line of the view: the diff of its file
+    pub fn click(&mut self, line: usize) {
+        if let Some(index) = line.checked_sub(HEADER).and_then(|row| self.lines.get(row).copied().flatten()) {
+            self.selected = index;
+            self.diff();
+        }
     }
 
     /// The diff of the selected file, in a floating pane (with the pager of
@@ -362,7 +289,8 @@ impl State {
         open_command_pane_floating(command, coordinates, BTreeMap::new());
     }
 
-    fn render_panel(&mut self, rows: usize, cols: usize) {
+    /// The lines of the view, under the tabs of the panel
+    pub fn render(&mut self, rows: usize, cols: usize) -> Vec<String> {
         let width = cols.saturating_sub(1);
         let directory = self.cwd.as_ref().map(|cwd| cwd.to_string_lossy().to_string()).unwrap_or_default();
         let project = common::project(&directory);
@@ -373,7 +301,6 @@ impl State {
             format!("\u{1b}[1m{project}\u{1b}[0m \u{1b}[36m⎇ {}\u{1b}[0m", truncate(&branch(&self.branch), width / 2))
         };
         let mut output = vec![
-            panel::tabs("git"),
             title,
             format!(
                 "\u{1b}[2m{}\u{1b}[0m",
@@ -385,16 +312,14 @@ impl State {
             output.push(String::new());
             output.push(format!("\u{1b}[2m{}\u{1b}[0m", truncate(error, width)));
             self.lines.clear();
-            print!("{}", output.join("\n"));
-            return;
+            return output;
         }
         if self.entries.is_empty() {
             output.push(String::new());
             let text = if self.cwd.is_none() || self.branch.is_empty() { "…" } else { "No changes" };
             output.push(format!("\u{1b}[2m{text}\u{1b}[0m"));
             self.lines.clear();
-            print!("{}", output.join("\n"));
-            return;
+            return output;
         }
 
         // The entry of each line; None: the title of a section
@@ -447,9 +372,7 @@ impl State {
         }
         self.offset = offset;
         self.lines = shown;
-
-        // Without a newline after the last line: the pane would scroll
-        print!("{}", output.join("\n"));
+        output
     }
 }
 

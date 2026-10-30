@@ -1,12 +1,12 @@
 [package]
 name = "claude"
-description = "Claude Code sessions in zellij: status, tab names and a list to jump to them"
+description = "Claude Code sessions in zellij: status and tab names; the side panel: git changes, the sessions to jump to"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-common = { path = "../common", features = ["panel"] }
+common = { path = "../common" }
 serde.workspace = true
 serde_json.workspace = true
 zellij-tile.workspace = true

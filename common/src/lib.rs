@@ -3,9 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 
-#[cfg(feature = "panel")]
-pub mod panel;
-
 /// From the Claude Code hook to all the plugins: the hook input (JSON) as
 /// payload, the zellij pane of Claude and the time as arguments.
 pub const EVENT_PIPE: &str = "claude::event";
@@ -14,13 +11,14 @@ pub const STATE_PIPE: &str = "claude::state";
 /// To the claude plugin: asks for the sessions, sent again on STATE_PIPE.
 pub const SYNC_PIPE: &str = "claude::sync";
 
-/// From the panels to the bars: the panel to show in place of the focused
-/// one (its name: git or claude), floating or not (`floating` argument).
-pub const SWITCH_PIPE: &str = "panel::switch";
-/// From a panel starting to the bars: its name, to know if it was launched
-/// in place of a floating panel; the answer to it: floating or docked.
+/// To the claude plugin (a key binding, a button of the bar): the side panel
+/// of the active tab, showing this view (git or claude).
+pub const OPEN_PIPE: &str = "panel::open";
+/// From a side panel starting to the claude plugin, which opens them.
 pub const HELLO_PIPE: &str = "panel::hello";
-pub const MODE_PIPE: &str = "panel::mode";
+/// From the claude plugin to a side panel already open: this view, focused
+/// (closed if it was already).
+pub const SHOW_PIPE: &str = "panel::show";
 
 /// Ends the tab names set by the plugins (and by the zellij module of
 /// Prezto): a tab without it was renamed by hand and is left alone.

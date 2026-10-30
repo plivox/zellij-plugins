@@ -5,10 +5,11 @@
 //! A click on a tab goes to it, a double click renames it (like the
 //! RenameTab mode: Enter keeps the new name, Esc restores the previous one),
 //! a click on the ✕ of the active tab asks to confirm (a second click within
-//! a few seconds) and closes it. A click on the Git button opens the git
-//! panel, on the Claude Code button (✳ and the sessions by status) their
-//! list, like their key bindings. A double click on the session renames it
-//! (Enter keeps the new name, Esc cancels).
+//! a few seconds) and closes it. A click on the Git button opens the side
+//! panel of the tab on its Git view, on the Claude Code button (✳ and the
+//! sessions by status) on its Claude view, like their key bindings (through
+//! the claude plugin, which opens it). A double click on the session renames
+//! it (Enter keeps the new name, Esc cancels).
 //!
 //! The directory of the Claude Code session of the focused pane (the one to
 //! resume it in), on the left.
@@ -18,26 +19,18 @@
 //! pane_id=$ZELLIJ_PANE_ID,time=$EPOCHREALTIME -- "🤖 25.9.0 🐍 3.14.4"`, on
 //! the right.
 //!
-//! The tabs of the panels (git, claude) show one in place of the other
-//! through the bar of their tab, which knows their URLs.
-//!
 //! Configuration (all optional):
 //! - `view`: `tabs` or `status` for a split bar, else both
 //! - `timezone`: of the time (e.g. Europe/Zurich), else no time
 //! - `hint`: text before the time
-//! - `git`, `claude`: URL of the git and claude plugins, for their buttons
-//! - `git_docked`, `claude_docked`: `true` when their key bindings start them
-//!   docked (the same configuration: the same panel)
+//! - `git`, `claude`: set (e.g. `true`) for their buttons
 
 use std::collections::{BTreeMap, HashMap};
-use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::Utc;
 use chrono_tz::Tz;
-use common::{
-    HELLO_PIPE, MODE_PIPE, NAME_MARKER, STATE_PIPE, SWITCH_PIPE, SYNC_PIPE, Session, Status, short_directory,
-};
+use common::{NAME_MARKER, OPEN_PIPE, STATE_PIPE, SYNC_PIPE, Session, Status, short_directory};
 use zellij_tile::prelude::*;
 
 /// Two clicks on the same tab within this delay rename it
@@ -47,8 +40,6 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(500);
 const CLICK_PIPE: &str = "bar::click";
 /// From the shells: the runtimes of their pane
 const RUNTIMES_PIPE: &str = "bar::runtimes";
-/// A panel launched in place of another one asks how this long after
-const SWITCH_ANSWER: Duration = Duration::from_secs(5);
 /// Longest directory of a Claude Code session
 const MAX_DIRECTORY: usize = 60;
 /// Delay to confirm the close of a tab
@@ -96,10 +87,9 @@ struct State {
     view: View,
     timezone: Option<Tz>,
     hint: String,
-    git_url: Option<String>,
-    git_docked: bool,
-    claude_url: Option<String>,
-    claude_docked: bool,
+    /// The Git and Claude Code buttons
+    git: bool,
+    claude: bool,
 
     mode: InputMode,
     session: String,
@@ -120,9 +110,6 @@ struct State {
     /// The last click on the session; its new name typed, the pane focused
     /// before
     session_click: Option<SystemTime>,
-    /// The panel launched in place of another one: floating like it, and
-    /// when
-    switched: Option<(String, bool, SystemTime)>,
     session_name: Option<String>,
     focused_before: Option<PaneId>,
     /// The tab to close on a second click on its button, until this time
@@ -153,18 +140,13 @@ impl ZellijPlugin for State {
             Some("status") => View::Status,
             _ => View::All,
         };
-        let docked = |name: &str| configuration.get(name).is_some_and(|docked| docked == "true");
-        self.git_url = configuration.get("git").cloned();
-        self.git_docked = docked("git_docked");
-        self.claude_url = configuration.get("claude").cloned();
-        self.claude_docked = docked("claude_docked");
+        self.git = configuration.contains_key("git");
+        self.claude = configuration.contains_key("claude");
 
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::MessageAndLaunchOtherPlugins,
-            // The buttons: zellij action launch-or-focus-plugin
-            PermissionType::RunCommands,
             // The runtimes sent by the shells
             PermissionType::ReadCliPipes,
         ]);
@@ -263,41 +245,6 @@ impl ZellijPlugin for State {
                 },
                 _ => false,
             },
-            // From a panel of the tab of this bar: the other in its place
-            SWITCH_PIPE
-                if self.tab.is_some() && self.tab == self.tabs.iter().find(|t| t.active).map(|t| t.position) =>
-            {
-                let (url, configuration) = match message.payload.as_deref() {
-                    Some("git") => (self.git_url.as_deref(), self.git_config()),
-                    Some("claude") => (self.claude_url.as_deref(), self.claude_config()),
-                    _ => return false,
-                };
-                if url.is_some() {
-                    let floating = message.args.get("floating").is_some_and(|f| f == "true");
-                    let name = message.payload.clone().unwrap_or_default();
-                    self.switched = Some((name, floating, SystemTime::now()));
-                }
-                self.launch(url, &configuration, true);
-                false
-            },
-            // A panel starting: floating if launched in place of a floating
-            // one
-            HELLO_PIPE => {
-                let PipeSource::Plugin(id) = message.source else {
-                    return false;
-                };
-                let recent = |time: &SystemTime| time.elapsed().is_ok_and(|e| e < SWITCH_ANSWER);
-                if let Some((_, floating, _)) = self
-                    .switched
-                    .take_if(|(name, _, time)| message.payload.as_deref() == Some(name.as_str()) && recent(time))
-                {
-                    let mode = if floating { "floating" } else { "docked" };
-                    pipe_message_to_plugin(
-                        MessageToPlugin::new(MODE_PIPE).with_destination_plugin_id(id).with_payload(mode),
-                    );
-                }
-                false
-            },
             RUNTIMES_PIPE => {
                 // The zellij pipe of the shell waits for it
                 if let PipeSource::Cli(pipe) = &message.source {
@@ -354,7 +301,7 @@ impl ZellijPlugin for State {
         }
 
         let mut right = Line::default();
-        if status && self.git_url.is_some() {
+        if status && self.git {
             let start = right.width;
             right.push("⎇ git", Some(TERM_BLUE), None, false);
             buttons.push((start, right.width, Target::Git));
@@ -402,7 +349,9 @@ impl State {
     /// The Claude Code button: ✳ and the count of the sessions by status,
     /// the ones that need attention first; returns its columns in the line.
     fn claude_summary(&self, line: &mut Line) -> Option<(usize, usize)> {
-        self.claude_url.as_ref()?;
+        if !self.claude {
+            return None;
+        }
         let start = line.width;
         line.push("✳", Some(ORANGE), None, true);
         if self.sessions.is_empty() {
@@ -592,8 +541,8 @@ impl State {
                     self.rename_session();
                 }
             },
-            Target::Git => self.launch(self.git_url.as_deref(), &self.git_config(), false),
-            Target::Claude => self.launch(self.claude_url.as_deref(), &self.claude_config(), false),
+            Target::Git => open_panel("git"),
+            Target::Claude => open_panel("claude"),
         }
         true
     }
@@ -650,38 +599,11 @@ impl State {
             focus_pane_with_id(pane, false, false);
         }
     }
+}
 
-    /// The configurations of the key bindings of the panels (the same: the
-    /// same panel)
-    fn git_config(&self) -> String {
-        if self.git_docked { "docked=true" } else { "" }.to_string()
-    }
-
-    fn claude_config(&self) -> String {
-        if self.claude_docked { "view=list,docked=true" } else { "view=list" }.to_string()
-    }
-
-    /// Like their key bindings: the panel of the plugin (with this
-    /// configuration) launched, or moved to the focused tab; or in place of
-    /// the focused pane (the other panel), closed
-    fn launch(&self, url: Option<&str>, configuration: &str, in_place: bool) {
-        let Some(url) = url else { return };
-        if !self.permitted {
-            return;
-        }
-        let mut command = vec!["zellij", "action", "launch-or-focus-plugin"];
-        if in_place {
-            command.extend(["--in-place", "--close-replaced-pane"]);
-        } else {
-            command.extend(["--floating", "--move-to-focused-tab"]);
-        }
-        if !configuration.is_empty() {
-            command.extend(["--configuration", configuration]);
-        }
-        command.push(url);
-        let env = BTreeMap::from([("ZELLIJ_SESSION_NAME".to_string(), self.session.clone())]);
-        run_command_with_env_variables_and_cwd(&command, env, PathBuf::from("/"), BTreeMap::new());
-    }
+/// The side panel of the active tab on this view, through the claude plugin
+fn open_panel(view: &str) {
+    pipe_message_to_plugin(MessageToPlugin::new(OPEN_PIPE).with_payload(view));
 }
 
 /// Text with colors, and its width in columns
